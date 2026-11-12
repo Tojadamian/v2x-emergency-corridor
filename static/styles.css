@@ -1,0 +1,33 @@
+:root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; background: #0b1019; color: #e8eef8; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 1440px; margin: auto; padding: 38px 5%; }
+header, .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+h1, h2, p { margin: 0; }
+h1 { font-size: clamp(1.7rem, 3vw, 2.5rem); margin: 6px 0; letter-spacing: -.03em; }
+h2 { font-size: 1.15rem; }
+.eyebrow { color: #8293ac; font-size: .68rem; font-weight: 700; letter-spacing: .13em; margin-bottom: 8px; }
+.muted, footer { color: #91a1b7; font-size: .85rem; }
+.status { color: #7ee4bc; border: 1px solid #285a4d; background: #102921; border-radius: 20px; padding: 7px 12px; font-size: .78rem; white-space: nowrap; }
+.status.offline { color: #ff9a9a; border-color: #853b43; background: #331820; }
+.banner, .card { border: 1px solid #263449; border-radius: 12px; background: #121b29; }
+.banner { margin: 28px 0 16px; padding: 22px 24px; border-left: 4px solid #40c99d; }
+.banner p:last-child { color: #a7b5c8; margin-top: 8px; }
+.banner.active { border-color: #b7464f; border-left-color: #ff616b; background: #321b25; }
+.banner.active h2 { color: #ff8790; }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
+.card { padding: 22px; }
+.metrics strong { display: block; font-size: 2rem; margin-top: 8px; }
+.vehicle-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-top: 20px; }
+.vehicle { padding: 16px; border: 1px solid #293a4f; border-radius: 9px; background: #0e1622; }
+.vehicle strong { display: block; margin-bottom: 10px; }
+.vehicle p { color: #a7b5c8; font-size: .8rem; line-height: 1.8; overflow-wrap: anywhere; }
+.columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+.feed { list-style: none; padding: 0; margin: 16px 0 0; max-height: 430px; overflow-y: auto; }
+.feed li { padding: 13px 0; border-top: 1px solid #263449; }
+.feed strong, .feed span { display: block; overflow-wrap: anywhere; }
+.feed strong { font-size: .85rem; }
+.feed span { color: #9eacc0; font-size: .78rem; margin-top: 5px; line-height: 1.5; }
+.feed .critical strong { color: #ff8790; }
+footer { margin-top: 22px; text-align: right; }
+@media (max-width: 700px) { main { padding: 24px 16px; } .columns { grid-template-columns: 1fr; } .metrics { gap: 8px; } .metrics .card { padding: 14px; } .metrics strong { font-size: 1.5rem; } }

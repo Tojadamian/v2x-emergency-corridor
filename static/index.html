@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>V2X Emergency Corridor</title>
+  <link rel="stylesheet" href="/ui/styles.css">
+  <script defer src="/ui/app.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">DISTRIBUTED TRAFFIC MONITORING</p><h1>Emergency Corridor</h1><p class="muted">Live V2X operations overview</p></div>
+      <span id="connection" class="status">Connecting</span>
+    </header>
+    <section id="corridor" class="banner" aria-live="polite">
+      <div><p class="eyebrow">CORRIDOR STATUS</p><h2 id="corridor-title">Waiting for data</h2><p id="corridor-detail"></p></div>
+    </section>
+    <section class="metrics" aria-label="Processing metrics">
+      <article class="card"><p class="muted">Processed events</p><strong id="processed">0</strong></article>
+      <article class="card"><p class="muted">Duplicates ignored</p><strong id="duplicates">0</strong></article>
+      <article class="card"><p class="muted">Active corridors</p><strong id="corridor-count">0</strong></article>
+    </section>
+    <section class="card">
+      <div class="section-heading"><div><p class="eyebrow">FLEET OVERVIEW</p><h2>Vehicle status</h2></div><span class="muted">5 monitored vehicles</span></div>
+      <div id="vehicles" class="vehicle-grid"></div>
+    </section>
+    <div class="columns">
+      <section class="card"><div class="section-heading"><div><p class="eyebrow">SAFETY</p><h2>Recent alerts</h2></div></div><ul id="alerts" class="feed"></ul></section>
+      <section class="card"><div class="section-heading"><div><p class="eyebrow">ACTIVITY</p><h2>Event log</h2></div></div><ul id="events" class="feed"></ul></section>
+    </div>
+    <footer>Updates every 2 seconds <span id="updated"></span></footer>
+  </main>
+</body>
+</html>
