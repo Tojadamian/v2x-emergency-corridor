@@ -115,6 +115,16 @@ def test_api_ingest_and_dashboard():
         assert client.get("/ui/app.js").status_code == 200
 
 
+def test_s3_assets_have_local_fallback():
+    settings = Settings(s3_static_base_url="https://example.com/static")
+    with TestClient(create_app(settings, InMemoryStorage())) as client:
+        html = client.get("/").text
+        assert 'href="https://example.com/static/styles.css"' in html
+        assert 'src="https://example.com/static/app.js"' in html
+        assert "this.href='/ui/styles.css'" in html
+        assert "script.src='/ui/app.js'" in html
+
+
 def test_config_validation(monkeypatch):
     monkeypatch.setenv("ENABLE_SQS_WORKER", "true")
     monkeypatch.delenv("SQS_QUEUE_URL", raising=False)
