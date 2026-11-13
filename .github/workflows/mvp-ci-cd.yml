@@ -25,7 +25,7 @@ jobs:
       - name: Run pytest unit tests
         env:
           STORAGE_BACKEND: memory
-        run: pytest -v
+        run: python -m pytest -v
 
   build-and-publish:
     name: Publish Image to ECR & Static Files to S3
