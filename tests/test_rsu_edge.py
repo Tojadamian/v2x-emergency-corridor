@@ -368,6 +368,7 @@ class TestEdgeCloudDisconnectionBuffering:
         assert processor.buffered_count == 0
         assert processor.flushed_events_count == 3
         assert processor.last_recovery_time_ms > 0
+        assert processor.last_recovery_time_ms < 1_000_000_000
 
 
 class TestSNSAlertRelay:

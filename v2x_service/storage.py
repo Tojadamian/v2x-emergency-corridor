@@ -11,6 +11,13 @@ from common.schemas import V2XAlert, V2XEvent
 from v2x_service.rules import evaluate_event_for_alert
 
 METRICS_KEY = "__v2x_duplicates__"
+SECTORS = ("sector-A12-tunnel", "sector-B04-bridge")
+BASELINE_VEHICLES = {
+    "veh-001": (1, 64),
+    "veh-002": (2, 72),
+    "veh-003": (3, 58),
+    "veh-004": (1, 78),
+}
 
 
 def event_time(event: V2XEvent) -> datetime:
@@ -24,6 +31,35 @@ def latest_states(events: List[V2XEvent]) -> Dict[str, V2XEvent]:
         if previous is None or event_time(event) > event_time(previous):
             states[event.source_id] = event
     return states
+
+
+def baseline_sector_vehicles() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    sector_vehicles: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for sector in SECTORS:
+        sector_vehicles[sector] = {}
+        for vehicle_id, (lane, speed_kmh) in BASELINE_VEHICLES.items():
+            event = V2XEvent(
+                event_id=f"baseline-{sector}-{vehicle_id}",
+                source_id=vehicle_id,
+                event_type="traffic_telemetry",
+                location=sector,
+                payload={"lane": lane, "speed_kmh": speed_kmh},
+            )
+            sector_vehicles[sector][vehicle_id] = event.model_dump(mode="json")
+        ambulance = V2XEvent(
+            event_id=f"baseline-{sector}-veh-005",
+            source_id="veh-005",
+            event_type="traffic_telemetry",
+            location=sector,
+            payload={
+                "lane": 2,
+                "speed_kmh": 0,
+                "siren_active": False,
+                "vehicle_type": "ambulance",
+            },
+        )
+        sector_vehicles[sector]["veh-005"] = ambulance.model_dump(mode="json")
+    return sector_vehicles
 
 
 def _percentile(samples: List[float], percentile: float) -> float:
@@ -107,6 +143,19 @@ def build_summary(
 ) -> Dict[str, Any]:
     events = [V2XEvent.model_validate(record["event"]) for record in records]
     states = latest_states(events)
+    sector_states: Dict[str, Dict[str, V2XEvent]] = {}
+    for event in events:
+        sector_states.setdefault(event.location, {})
+        previous = sector_states[event.location].get(event.source_id)
+        if previous is None or event_time(event) > event_time(previous):
+            sector_states[event.location][event.source_id] = event
+
+    sector_vehicles = baseline_sector_vehicles()
+    for sector, vehicles in sector_states.items():
+        sector_vehicles.setdefault(sector, {})
+        for vehicle_id, event in vehicles.items():
+            sector_vehicles[sector][vehicle_id] = event.model_dump(mode="json")
+
     alerts = [record["alert"] for record in records if record.get("alert")]
     events.sort(key=event_time, reverse=True)
     alerts.sort(key=lambda alert: alert["created_at"], reverse=True)
@@ -114,12 +163,17 @@ def build_summary(
         record["event"]["event_id"] for record in records
         if record.get("alert") and record["alert"]["alert_type"] == "EMERGENCY_CORRIDOR_ALERT"
     }
-    corridors = sorted({state.location for state in states.values() if state.event_id in corridor_event_ids})
+    corridors = sorted({
+        sector
+        for sector, vehicles in sector_vehicles.items()
+        if any(state.get("event_id") in corridor_event_ids for state in vehicles.values())
+    })
     result = {
         "processed_events": len(events),
         "duplicates_ignored": duplicates,
         "active_emergency_corridors": corridors,
         "vehicles": {key: value.model_dump(mode="json") for key, value in states.items()},
+        "sector_vehicles": sector_vehicles,
         "recent_alerts": alerts[:50],
         "recent_events": [event.model_dump(mode="json") for event in events[:50]],
     }

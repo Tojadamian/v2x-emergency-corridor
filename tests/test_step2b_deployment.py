@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
         ("emergency_corridor", "http://rsu-2:8002", "emergency_vehicle", 1),
         ("sudden_braking", "http://rsu-1:8001", "sudden_braking", 1),
         ("road_hazard", "http://rsu-1:8001", "road_hazard", 1),
-        ("duplicate_burst", "http://rsu-1:8001", "traffic_telemetry", 3),
+        ("duplicate_burst", "http://rsu-1:8001", "traffic_telemetry", 1),
     ],
 )
 def test_scenario_events_are_forwarded_to_the_assigned_rsu(
@@ -93,6 +93,28 @@ def test_summary_normalizes_live_rsu_status_aliases():
         assert node["rejected_events"] == 2
         assert node["flushed_events_count"] == 5
         assert node["last_recovery_time_ms"] == 1234
+
+
+def test_summary_sanitizes_epoch_recovery_timestamps():
+    settings = Settings(
+        storage_backend="memory",
+        rsu_1_url="http://rsu-1:8001",
+        rsu_2_url="http://rsu-2:8002",
+    )
+    app = create_app(settings=settings, storage=InMemoryStorage())
+    response_from_rsu = MagicMock()
+    response_from_rsu.json.return_value = {"last_recovery_time_ms": 1_794_628_363_698}
+    response_from_rsu.raise_for_status.return_value = None
+    http_client = AsyncMock()
+    http_client.__aenter__.return_value = http_client
+    http_client.get.return_value = response_from_rsu
+
+    with patch("v2x_service.main.httpx.AsyncClient", return_value=http_client):
+        response = TestClient(app).get("/api/summary")
+
+    assert response.status_code == 200
+    for node in response.json()["rsu_nodes"].values():
+        assert node["last_recovery_time_ms"] == 1
 
 
 def test_dashboard_rsu_controls_and_emergency_corridor_rendering():

@@ -215,10 +215,11 @@ class EdgeProcessor:
 
     def flush_buffer(self) -> List[V2XEvent]:
         """Flush all buffered events and return them in order."""
+        start_time = time.perf_counter()
         events = list(self.buffered_events)
         self.buffered_events.clear()
         self.flushed_events_count = len(events)
-        self.last_recovery_time_ms = int(time.time() * 1000)
+        self.last_recovery_time_ms = max(1, int((time.perf_counter() - start_time) * 1000))
         self.buffered_count = 0
         return events
 

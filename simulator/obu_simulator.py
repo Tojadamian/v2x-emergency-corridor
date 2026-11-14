@@ -77,18 +77,24 @@ def generate_burst(
     vehicle_index: int = 0,
     sequence_numbers: Optional[MutableMapping[str, int]] = None,
     rng=random,
+    roam_sectors: bool = False,
 ) -> tuple[list[V2XEvent], int]:
     if burst_size < 1:
         raise ValueError("burst_size must be at least 1")
     events = []
     for offset in range(burst_size):
-        events.append(
-            generate_event(
-                VEHICLES[(vehicle_index + offset) % len(VEHICLES)],
-                sequence_numbers=sequence_numbers,
-                rng=rng,
-            )
+        event = generate_event(
+            VEHICLES[(vehicle_index + offset) % len(VEHICLES)],
+            sequence_numbers=sequence_numbers,
+            rng=rng,
         )
+        if roam_sectors and event.seq_num % 2 == 0:
+            event.location, event.rsu_id = (
+                ("sector-B04-bridge", "rsu-2")
+                if event.location == "sector-A12-tunnel"
+                else ("sector-A12-tunnel", "rsu-1")
+            )
+        events.append(event)
     return events, (vehicle_index + burst_size) % len(VEHICLES)
 
 
@@ -204,6 +210,7 @@ def main() -> None:
     parser.add_argument("--duplicate-rate", type=float, default=0.0)
     parser.add_argument("--reorder-rate", type=float, default=0.0)
     parser.add_argument("--burst-size", type=int, default=1)
+    parser.add_argument("--roam-sectors", action="store_true", help="Alternate each vehicle between the two sectors")
     parser.add_argument("--iterations", type=int, default=0, help="Burst cycles; zero runs indefinitely")
     args = parser.parse_args()
 
@@ -265,7 +272,7 @@ def main() -> None:
     transmitted = 0
     try:
         while args.iterations == 0 or cycles < args.iterations:
-            burst, vehicle_index = generate_burst(args.burst_size, vehicle_index)
+            burst, vehicle_index = generate_burst(args.burst_size, vehicle_index, roam_sectors=args.roam_sectors)
             for event in burst:
                 transmitted += injector.transmit(event, send_event)
                 print(

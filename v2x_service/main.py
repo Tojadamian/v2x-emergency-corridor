@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from html import escape
 import logging
 import os
+import random
 from pathlib import Path
 from typing import Optional, Dict, Any
 from urllib.parse import urlsplit
@@ -79,7 +80,12 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(f"{rsu_url}/api/status")
                 response.raise_for_status()
-                return response.json()
+                status = response.json()
+                if isinstance(status, dict):
+                    recovery_time_ms = status.get("last_recovery_time_ms", 0)
+                    if isinstance(recovery_time_ms, (int, float)) and recovery_time_ms > 1_000_000_000:
+                        status["last_recovery_time_ms"] = 1
+                return status
         except (httpx.HTTPError, Exception):
             return None
 
@@ -229,59 +235,148 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
     async def simulate_scenario(payload: Dict[str, Any]):
         scenario = payload.get("scenario", "").lower()
         now = datetime.now(timezone.utc).isoformat()
-        rsu_url = None
+        requested_sector = payload.get("sector")
+        if "sector" in payload and requested_sector not in ("sector-A12-tunnel", "sector-B04-bridge"):
+            return {"status": "error", "message": "Invalid sector"}
+
+        default_sectors = {
+            "emergency_corridor": "sector-B04-bridge",
+            "sudden_braking": "sector-A12-tunnel",
+            "road_hazard": "sector-A12-tunnel",
+            "duplicate_burst": "sector-A12-tunnel",
+            "normal_traffic": "sector-A12-tunnel",
+        }
+        if scenario not in default_sectors:
+            return {"status": "error", "message": "Unknown scenario"}
+
+        sector = requested_sector or default_sectors[scenario]
+        rsu_url = settings.rsu_1_url if sector == "sector-A12-tunnel" else settings.rsu_2_url
+        sector_vehicles = storage.summary()["sector_vehicles"].get(sector, {})
         events_to_inject = []
-        
+        forwarded_event = None
+
+        def lane_for(vehicle_id: str, fallback: int) -> int:
+            return int(sector_vehicles.get(vehicle_id, {}).get("payload", {}).get("lane", fallback))
+
         if scenario == "emergency_corridor":
-            rsu_url = settings.rsu_2_url
-            events_to_inject.append(V2XEvent(
+            passenger_ids = ["veh-001", "veh-002", "veh-003", "veh-004"]
+            random.shuffle(passenger_ids)
+            left_count = random.choice((1, 2, 3))
+            left_ids = set(passenger_ids[:left_count])
+            for vehicle_id in passenger_ids:
+                previous_lane = lane_for(vehicle_id, 1)
+                lane = 1 if vehicle_id in left_ids else 3
+                events_to_inject.append(V2XEvent(
+                    event_id=f"demo-yield-{vehicle_id}-{now}",
+                    source_id=vehicle_id,
+                    event_type="traffic_telemetry",
+                    location=sector,
+                    payload={
+                        "lane": lane,
+                        "speed_kmh": random.randint(0, 5),
+                        "yielding": True,
+                        "pulled_from_center": previous_lane == 2,
+                    },
+                ))
+            forwarded_event = V2XEvent(
                 event_id=f"demo-emergency-{now}",
                 source_id="veh-005",
                 event_type="emergency_vehicle",
-                location="sector-B04-bridge",
-                payload={"speed_kmh": 80, "siren_active": True, "target_lane": 2},
-            ))
+                location=sector,
+                payload={
+                    "lane": 2,
+                    "speed_kmh": random.randint(85, 100),
+                    "siren_active": True,
+                    "target_lane": 2,
+                    "vehicle_type": "ambulance",
+                },
+            )
+            events_to_inject.append(forwarded_event)
         elif scenario == "sudden_braking":
-            rsu_url = settings.rsu_1_url
-            events_to_inject.append(V2XEvent(
+            source_id = random.choice(("veh-001", "veh-002", "veh-003", "veh-004"))
+            forwarded_event = V2XEvent(
                 event_id=f"demo-braking-{now}",
-                source_id="veh-001",
+                source_id=source_id,
                 event_type="sudden_braking",
-                location="sector-A12-tunnel",
-                payload={"speed_kmh": 45, "lane": 2, "deceleration_ms2": 7.5},
-            ))
+                location=sector,
+                payload={
+                    "speed_kmh": random.randint(12, 25),
+                    "lane": lane_for(source_id, 2),
+                    "deceleration_ms2": 7.5,
+                },
+            )
+            events_to_inject.append(forwarded_event)
         elif scenario == "road_hazard":
-            rsu_url = settings.rsu_1_url
-            events_to_inject.append(V2XEvent(
+            source_id = random.choice(("veh-001", "veh-002", "veh-003", "veh-004"))
+            forwarded_event = V2XEvent(
                 event_id=f"demo-hazard-{now}",
-                source_id="veh-002",
+                source_id=source_id,
                 event_type="road_hazard",
-                location="sector-A12-tunnel",
-                payload={"hazard_type": "debris", "severity": "high"},
-            ))
+                location=sector,
+                payload={
+                    "lane": lane_for(source_id, 3),
+                    "speed_kmh": random.randint(15, 28),
+                    "hazard_type": "debris",
+                    "severity": "high",
+                },
+            )
+            events_to_inject.append(forwarded_event)
         elif scenario == "duplicate_burst":
-            rsu_url = settings.rsu_1_url
+            source_id = "veh-003"
             base_event = V2XEvent(
                 event_id=f"demo-burst-{now}",
-                source_id="veh-003",
+                source_id=source_id,
                 event_type="traffic_telemetry",
-                location="sector-A12-tunnel",
-                payload={"speed_kmh": 60, "lane": 1, "density": "moderate"},
+                location=sector,
+                payload={
+                    "speed_kmh": 60,
+                    "lane": lane_for(source_id, 1),
+                    "density": "moderate",
+                },
             )
             events_to_inject.extend([base_event] * 3)
-        else:
-            return {"status": "error", "message": "Unknown scenario"}
-        
+            forwarded_event = base_event
+        elif scenario == "normal_traffic":
+            for vehicle_id in ("veh-001", "veh-002", "veh-003", "veh-004"):
+                events_to_inject.append(V2XEvent(
+                    event_id=f"demo-normal-{vehicle_id}-{now}",
+                    source_id=vehicle_id,
+                    event_type="traffic_telemetry",
+                    location=sector,
+                    payload={
+                        "lane": random.randint(1, 3),
+                        "speed_kmh": random.randint(55, 85),
+                        "yielding": False,
+                        "pulled_from_center": False,
+                    },
+                ))
+            events_to_inject.append(V2XEvent(
+                event_id=f"demo-ambulance-standby-{now}",
+                source_id="veh-005",
+                event_type="traffic_telemetry",
+                location=sector,
+                payload={
+                    "lane": 2,
+                    "speed_kmh": 0,
+                    "siren_active": False,
+                    "vehicle_type": "ambulance",
+                },
+            ))
+            forwarded_event = events_to_inject[0]
+
         injected_count = 0
         for event in events_to_inject:
             if inject_synthetic_event(event):
                 injected_count += 1
-            try:
-                async with httpx.AsyncClient(timeout=0.4) as client:
-                    response = await client.post(f"{rsu_url}/api/events", json=event.model_dump(mode="json"))
-                    response.raise_for_status()
-            except httpx.HTTPError:
-                logger.warning("Could not forward demo event %s to RSU at %s", event.event_id, rsu_url)
+        try:
+            async with httpx.AsyncClient(timeout=0.4) as client:
+                response = await client.post(
+                    f"{rsu_url}/api/events",
+                    json=forwarded_event.model_dump(mode="json"),
+                )
+                response.raise_for_status()
+        except httpx.HTTPError:
+            logger.warning("Could not forward demo event %s to RSU at %s", forwarded_event.event_id, rsu_url)
         
         return {"status": "ok", "scenario": scenario, "events_injected": injected_count}
 

@@ -20,6 +20,8 @@ python simulator/obu_simulator.py --mode http --rate 2
 
 The rate is the total number of events per second across the five vehicles. Use `--http-url` to target another service. Run tests with `python -m pytest`.
 
+Use `--roam-sectors` to alternate each vehicle's successive events between the tunnel and bridge, routed to the corresponding RSU. Without it, each vehicle keeps its default sector.
+
 ## AWS configuration
 
 | Variable | Default | Description |
@@ -36,6 +38,8 @@ Create a DynamoDB table with a string partition key named `event_id`, and an SQS
 The service provides `/api/summary`, `/api/state`, `/api/events`, `/api/alerts`, and `POST /api/events/ingest`, as well as static files under `/ui`. The summary retains the most recent 50 events and alerts, with counts across all stored events. Dashboard state is reconstructed from all stored events, so the DynamoDB implementation scans the table and is intended for MVP-scale datasets. Memory storage is process-local and is lost on restart; use DynamoDB for persistent or multi-instance deployments.
 
 Event timestamps must include a timezone. Vehicle state is the event with the latest timestamp for each source. A corridor is active while a vehicle's latest event generated an emergency corridor alert; a later event without such an alert clears it. Emergency events with an active siren generate an alert, as does an ambulance entering a segment containing other vehicles. Alerts remain in history. Segment speed is the mean of the latest reported speeds for vehicles in that segment. Concurrent DynamoDB writers commit each event and its alert atomically and suppress duplicate event IDs; rule evaluation uses the current scan snapshot and is not serialized across different events.
+
+The highway map tracks vehicle state independently in both sectors. Each sector starts with four passenger vehicles in normal traffic; the ambulance remains on standby until a corridor is triggered there. Use each sector's action menu to trigger an emergency corridor, sudden braking, a road hazard, normal traffic, or a duplicate burst. These actions can also be requested through `POST /api/control/simulate-scenario` with an optional `sector` field; omitting it retains the scenario's default sector. Use the dashboard's Day Mode/Night Mode button to switch themes; the selection is saved in browser storage.
 
 Invalid SQS messages are logged and deleted; transient processing failures are logged and left on the queue for retry. Configure an SQS dead-letter queue for repeatedly failing valid messages. The worker long-polls for five seconds and handles up to ten messages per receive.
 

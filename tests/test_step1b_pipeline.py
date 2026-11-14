@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from common.schemas import V2XAlert, V2XEvent
 from rsu_service import main as rsu_main
 from rsu_service.edge_processor import EdgeProcessor
+from simulator import obu_simulator
 from simulator.obu_simulator import AnomalyInjector, VEHICLES, generate_burst, generate_event
 from v2x_service import main as cloud_main
 from v2x_service.config import Settings
@@ -225,6 +226,43 @@ def test_simulator_assignments_sequences_and_bursts():
     assert len(burst) == 7
     assert next_index == 2
     assert [event.seq_num for event in burst[:5]] == [1, 1, 1, 1, 1]
+
+
+def test_simulator_roaming_alternates_each_vehicle_and_matching_rsu():
+    events, _ = generate_burst(15, sequence_numbers={}, rng=random.Random(3), roam_sectors=True)
+    for index in range(5):
+        first, second, third = events[index], events[index + 5], events[index + 10]
+        assert first.location == third.location
+        assert first.location != second.location
+        for event in (first, second, third):
+            assert (event.location, event.rsu_id) in {
+                ("sector-A12-tunnel", "rsu-1"),
+                ("sector-B04-bridge", "rsu-2"),
+            }
+
+
+def test_simulator_roaming_flag_routes_events_to_matching_rsus(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "sys.argv",
+        ["obu_simulator", "--mode", "rsu-http", "--roam-sectors", "--burst-size", "10", "--iterations", "1"],
+    )
+    monkeypatch.setattr(obu_simulator.time, "sleep", lambda _: None)
+    monkeypatch.setattr(obu_simulator, "_http_post", lambda url, event: sent.append((url, event)))
+    monkeypatch.setattr(obu_simulator, "_vehicle_sequences", {})
+
+    obu_simulator.main()
+
+    assert len(sent) == 10
+    for url, event in sent:
+        expected = (
+            "http://127.0.0.1:8001/api/events"
+            if event.location == "sector-A12-tunnel"
+            else "http://127.0.0.1:8002/api/events"
+        )
+        assert url == expected
+    assert sent[0][1].source_id == sent[5][1].source_id
+    assert sent[0][1].location != sent[5][1].location
 
 
 def test_simulator_loss_duplication_reordering_and_delay_controls():
