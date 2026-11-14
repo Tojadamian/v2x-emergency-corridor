@@ -13,6 +13,7 @@ COPY common/ ./common/
 COPY v2x_service/ ./v2x_service/
 COPY rsu_service/ ./rsu_service/
 COPY simulator/ ./simulator/
+COPY experiments/ ./experiments/
 COPY static/ ./static/
 
 EXPOSE 8000

@@ -31,7 +31,11 @@ _rsu_states: Dict[str, Dict[str, Any]] = {
 }
 
 
-def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] = None) -> FastAPI:
+def create_app(
+    settings: Optional[Settings] = None,
+    storage: Optional[Storage] = None,
+    deliver_alerts: bool = True,
+) -> FastAPI:
     settings = settings or Settings.from_env()
     if storage is None:
         storage = (
@@ -48,6 +52,8 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
 
     def publish_alert(alert: V2XAlert) -> None:
         nonlocal sns_client
+        if not deliver_alerts:
+            return
         message = alert.model_dump_json()
         if sns_topic_arn:
             try:
@@ -193,6 +199,12 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
         if processed and alert:
             publish_alert(alert)
         return {"processed": processed, "alert": alert}
+
+    @app.post("/api/experiments/run")
+    def run_experiments():
+        from experiments.run_experiments import run_all_experiments
+
+        return {"status": "ok", "results": run_all_experiments()}
 
     @app.post("/api/control/reset")
     async def reset():

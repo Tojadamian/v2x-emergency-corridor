@@ -43,6 +43,10 @@ The highway map tracks vehicle state independently in both sectors. Each sector 
 
 Invalid SQS messages are logged and deleted; transient processing failures are logged and left on the queue for retry. Configure an SQS dead-letter queue for repeatedly failing valid messages. The worker long-polls for five seconds and handles up to ten messages per receive.
 
+## Controlled experiments
+
+Run `./.venv/bin/python -m experiments.run_experiments` to execute all four isolated experiment families. Results are saved to `dev_notes/experiment_results.json` and `EXPERIMENT_RESULTS.md`. The service also exposes `POST /api/experiments/run`; use `--live-url http://host:8000` to invoke that endpoint on a deployed service and save its results locally. This option executes the same isolated in-process simulation on the deployment: it does not exercise the deployment's real SQS, DynamoDB, MQTT, RSUs, network, or operational state. Alert delivery is disabled for these experiments. Fixed workloads are reproducible, but measured times and process peak memory vary. The generated report describes the metrics and limitations.
+
 ## EC2 deployment
 
 Install Docker and the AWS CLI on the EC2 instance, grant its AWS credentials access to ECR, SQS and DynamoDB, and run `deploy/deploy_ec2.sh [image-tag]` (default: `latest`). The script resolves the account and queue, pulls the image, and replaces the `v2x-service` container. Publish the image to ECR before deploying. It uses the instance role if no credentials are supplied; IMDSv2 access from a bridged container may require a metadata hop limit of at least 2. Alternatively, it passes explicitly exported AWS credential variables or mounts existing AWS shared credentials and config files read-only, including the selected `AWS_PROFILE`. Temporary credentials expire and must be refreshed. The container has access to any mounted credentials.
