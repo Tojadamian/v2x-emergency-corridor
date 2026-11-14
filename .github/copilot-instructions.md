@@ -13,26 +13,12 @@ All code, comments, logs, and Dashboard UI text MUST be in **English**.
 
 ### Architecture & Data Flow (Deliverable 1 MVP + Deliverable 2 Edge/Cloud Continuum)
 1. **Simulator (`simulator/obu_simulator.py`)**:
-   - Simulates 5 distinct vehicles (`veh-001` to `veh-005`) assigned across 2 RSU groups and road segments:
-     - `RSU 1` (`rsu-1`, `sector-A12-tunnel`): `veh-001`, `veh-002`, `veh-003`
-     - `RSU 2` (`rsu-2`, `sector-B04-bridge`): `veh-004`, `veh-005` (emergency ambulance)
-   - Supports configurable event rate, sequence numbers (`seq_num`), event types (`traffic_telemetry`, `sudden_braking`, `emergency_vehicle`, `road_hazard`), transport modes (`sqs`, `http`, `rsu-http`, `mqtt`), and controlled anomaly injection (`delay`, `loss`, `duplication`, `reordering`, `burst`).
-
+   - Simulates 5 distinct vehicles (`veh-001` to `veh-005`) assigned across 2 RSU groups (`rsu-1` in `sector-A12-tunnel` for `veh-001..003`, `rsu-2` in `sector-B04-bridge` for `veh-004..005` where `veh-005` is an ambulance).
+   - Supports `seq_num`, 4 event types (`traffic_telemetry`, `sudden_braking`, `emergency_vehicle`, `road_hazard`), modes (`sqs`, `http`, `rsu-http`, `mqtt`), and anomaly injection (`delay`, `loss`, `duplication`, `reordering`, `burst`).
 2. **Edge Layer — Roadside Units (`rsu_service/`)**:
    - Two containerized RSUs (`rsu-1`, `rsu-2`) receiving vehicle events via MQTT (`v2x/{rsu_id}/telemetry`) or HTTP (`/api/events`).
-   - Validates schemas, tracks duplicates (`event_id`) and sequence anomalies (`seq_num`), generates immediate local alerts (`origin="local"`) published over MQTT, aggregates routine `traffic_telemetry` into `traffic_density` summaries, forwards selected events to SQS `v2x-events`, buffers events offline during cloud disconnection, and relays cloud alerts from SNS `v2x-alerts` (`/sns/alerts`) to vehicles over MQTT.
-
+   - Generates immediate local alerts (`origin="local"`), aggregates routine `traffic_telemetry` into `traffic_density` summaries, forwards selected events to SQS `v2x-events`, buffers offline during disconnection, and relays cloud alerts from SNS `v2x-alerts` (`/sns/alerts`) over MQTT.
 3. **Cloud Service (`v2x_service/`)**:
-   - Containerized Python FastAPI application running on Amazon EC2.
-   - Background worker consumes messages from SQS queue `v2x-events` using `boto3` with idempotency by `event_id`.
-   - **Persistence (`v2x_service/storage.py`)**: Uses Amazon DynamoDB (`v2x-events-store` table with `event_id` as Partition Key) in AWS, with a seamless `InMemoryStorage` fallback when `STORAGE_BACKEND=memory`.
-   - **Automatic Alert Generation (`v2x_service/rules.py`) & SNS Distribution**:
-     - Triggers `EMERGENCY_CORRIDOR_ALERT`, `SEVERE_BRAKING_CONGESTION_ALERT`, and `ROAD_HAZARD_ALERT`, and publishes cloud alerts to Amazon SNS topic `v2x-alerts` (and RSU relay endpoints).
-
-4. **Dashboard & Static Files (`static/` + Amazon S3)**:
-   - Static frontend files (`index.html`, `styles.css`, `app.js`) are stored in `static/` and synced to Amazon S3, with local `/ui` mount fallback.
-
-5. **AWS Academy Learner Lab Constraints**:
-   - Default region MUST be `us-east-1`.
-   - Credentials use temporary session tokens (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`). Never hardcode credentials.
-   - Container images are pushed to **Amazon ECR**, and static/deployment bundles are uploaded to **Amazon S3**.
+   - FastAPI service consuming SQS `v2x-events` with `event_id` idempotency, storing state in DynamoDB (`v2x-events-store`) or `InMemoryStorage`, generating automatic alerts, and publishing them to SNS `v2x-alerts`.
+4. **AWS Academy Constraints**:
+   - Region `us-east-1`, temporary session credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), images in ECR, static/deploy bundles in S3.
