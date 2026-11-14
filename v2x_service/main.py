@@ -3,8 +3,9 @@ from html import escape
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 from urllib.parse import urlsplit
+from datetime import datetime, timezone
 
 import boto3
 import httpx
@@ -21,6 +22,12 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 logger = logging.getLogger(__name__)
+
+# Local RSU state storage for demo mode
+_rsu_states: Dict[str, Dict[str, Any]] = {
+    "rsu-1": {"cloud_disconnected": False},
+    "rsu-2": {"cloud_disconnected": False},
+}
 
 
 def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] = None) -> FastAPI:
@@ -67,6 +74,21 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
             except httpx.HTTPError:
                 logger.exception("Failed to relay alert %s to RSU endpoint %s", alert.alert_id, url)
 
+    async def fetch_rsu_status(rsu_url: str, timeout: float = 0.4) -> Optional[Dict[str, Any]]:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(f"{rsu_url}/api/status")
+                response.raise_for_status()
+                return response.json()
+        except (httpx.HTTPError, Exception):
+            return None
+
+    def inject_synthetic_event(event: V2XEvent) -> bool:
+        processed, alert = storage.process_event(event)
+        if processed and alert:
+            publish_alert(alert)
+        return processed
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         worker = None
@@ -96,8 +118,39 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
         )
 
     @app.get("/api/summary")
-    def summary():
-        return storage.summary()
+    async def summary():
+        result = storage.summary()
+        
+        # Fetch RSU status with timeout fallback
+        rsu_nodes = {}
+        for rsu_id, rsu_url in [("rsu-1", settings.rsu_1_url), ("rsu-2", settings.rsu_2_url)]:
+            rsu_status = await fetch_rsu_status(rsu_url)
+            if rsu_status:
+                received = rsu_status.get("received_events", 0)
+                filtered = rsu_status.get("filtered_telemetry_count", 0)
+                bandwidth_saved_pct = (filtered / received * 100) if received > 0 else 0.0
+                rsu_nodes[rsu_id] = {
+                    **rsu_status,
+                    "bandwidth_saved_pct": bandwidth_saved_pct,
+                }
+            else:
+                # Fallback: local state for demo/test mode
+                rsu_nodes[rsu_id] = {
+                    "rsu_id": rsu_id,
+                    "cloud_connected": not _rsu_states.get(rsu_id, {}).get("cloud_disconnected", False),
+                    "received_events": 0,
+                    "filtered_telemetry_count": 0,
+                    "forwarded_to_sqs": 0,
+                    "bandwidth_saved_pct": 0.0,
+                    "buffered_count": 0,
+                    "flushed_events_count": 0,
+                    "last_recovery_time_ms": 0,
+                    "local_edge_alerts": 0,
+                    "relayed_cloud_alerts": 0,
+                }
+        
+        result["rsu_nodes"] = rsu_nodes
+        return result
 
     @app.get("/api/state")
     def state():
@@ -120,11 +173,94 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
         return {"processed": processed, "alert": alert}
 
     @app.post("/api/control/reset")
-    def reset():
+    async def reset():
         storage.reset()
+        # Attempt to reset RSUs
+        for rsu_url in [settings.rsu_1_url, settings.rsu_2_url]:
+            try:
+                async with httpx.AsyncClient(timeout=0.5) as client:
+                    await client.post(f"{rsu_url}/api/control/reset")
+            except (httpx.HTTPError, Exception):
+                pass
         return {"status": "reset"}
+
+    @app.post("/api/control/rsu-disconnection")
+    async def rsu_disconnection(payload: Dict[str, Any]):
+        rsu_id = payload.get("rsu_id", "").lower()
+        disconnected = payload.get("disconnected", False)
+        
+        if rsu_id not in ("rsu-1", "rsu-2"):
+            return {"status": "error", "message": "Invalid rsu_id"}
+        
+        rsu_url = settings.rsu_1_url if rsu_id == "rsu-1" else settings.rsu_2_url
+        
+        # Try to forward to RSU endpoint
+        try:
+            async with httpx.AsyncClient(timeout=1.0) as client:
+                response = await client.post(
+                    f"{rsu_url}/api/control/disconnection",
+                    json={"disconnected": disconnected},
+                )
+                response.raise_for_status()
+                return {"status": "forwarded", "rsu_id": rsu_id}
+        except (httpx.HTTPError, Exception):
+            # Fallback: store locally for demo/test mode
+            if rsu_id in _rsu_states:
+                _rsu_states[rsu_id]["cloud_disconnected"] = disconnected
+            return {"status": "stored_locally", "rsu_id": rsu_id}
+
+    @app.post("/api/control/simulate-scenario")
+    def simulate_scenario(payload: Dict[str, Any]):
+        scenario = payload.get("scenario", "").lower()
+        now = datetime.now(timezone.utc).isoformat()
+        
+        events_to_inject = []
+        
+        if scenario == "emergency_corridor":
+            events_to_inject.append(V2XEvent(
+                event_id=f"demo-emergency-{now}",
+                source_id="veh-005",
+                event_type="emergency_vehicle",
+                location="sector-B04-bridge",
+                payload={"speed_kmh": 80, "siren_active": True, "target_lane": 2},
+            ))
+        elif scenario == "sudden_braking":
+            events_to_inject.append(V2XEvent(
+                event_id=f"demo-braking-{now}",
+                source_id="veh-001",
+                event_type="sudden_braking",
+                location="sector-A12-tunnel",
+                payload={"speed_kmh": 45, "lane": 2, "deceleration_ms2": 7.5},
+            ))
+        elif scenario == "road_hazard":
+            events_to_inject.append(V2XEvent(
+                event_id=f"demo-hazard-{now}",
+                source_id="veh-002",
+                event_type="road_hazard",
+                location="sector-A12-tunnel",
+                payload={"hazard_type": "debris", "severity": "high"},
+            ))
+        elif scenario == "duplicate_burst":
+            base_event = V2XEvent(
+                event_id=f"demo-burst-{now}",
+                source_id="veh-003",
+                event_type="traffic_telemetry",
+                location="sector-A12-tunnel",
+                payload={"speed_kmh": 60, "lane": 1, "density": "moderate"},
+            )
+            events_to_inject.extend([base_event] * 3)
+        else:
+            return {"status": "error", "message": "Unknown scenario"}
+        
+        injected_count = 0
+        for event in events_to_inject:
+            if inject_synthetic_event(event):
+                injected_count += 1
+        
+        return {"status": "ok", "scenario": scenario, "events_injected": injected_count}
 
     return app
 
 
 app = create_app()
+

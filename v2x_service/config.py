@@ -11,6 +11,8 @@ class Settings:
     s3_static_base_url: str = ""
     storage_backend: str = "memory"
     enable_sqs_worker: bool = False
+    rsu_1_url: str = "http://127.0.0.1:8001"
+    rsu_2_url: str = "http://127.0.0.1:8002"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -35,4 +37,6 @@ class Settings:
             s3_static_base_url=url,
             storage_backend=backend,
             enable_sqs_worker=worker == "true",
+            rsu_1_url=os.getenv("RSU_1_URL", "http://127.0.0.1:8001").rstrip("/"),
+            rsu_2_url=os.getenv("RSU_2_URL", "http://127.0.0.1:8002").rstrip("/"),
         )
