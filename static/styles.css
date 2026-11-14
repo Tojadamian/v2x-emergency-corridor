@@ -63,9 +63,13 @@ h2 { font-size: 1.15rem; }
 .control-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 20px; }
 button { padding: 10px 14px; border: 1px solid #2a5a7d; border-radius: 6px; background: #1e3a4d; color: #7ee4bc; font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
 button:hover { background: #2a4d63; border-color: #40c99d; }
+button.active { background: #4d1a1a; border-color: #ff616b; color: #ff9a9a; }
 button.danger { border-color: #7d2a2a; background: #4d1a1a; color: #ff8790; }
 button.danger:hover { background: #6d2a2a; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
+.emergency-corridor-banner { padding: 10px 12px; border: 1px solid #ff616b; border-radius: 6px; background: #321b25; color: #ff9a9a; font-size: 0.72rem; font-weight: 700; text-align: center; }
+.vehicle-badge.pull-left { box-shadow: inset 4px 0 #7ee4bc; }
+.vehicle-badge.pull-right { box-shadow: inset -4px 0 #ffb566; }
 
 footer { margin-top: 22px; text-align: right; }
 @media (max-width: 700px) { main { padding: 24px 16px; } .columns { grid-template-columns: 1fr; } .metrics { gap: 8px; } .metrics .card { padding: 14px; } .metrics strong { font-size: 1.5rem; } .twin-container { grid-template-columns: 1fr; } }

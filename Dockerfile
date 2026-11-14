@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY common/ ./common/
 COPY v2x_service/ ./v2x_service/
+COPY rsu_service/ ./rsu_service/
+COPY simulator/ ./simulator/
 COPY static/ ./static/
 
 EXPOSE 8000

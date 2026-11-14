@@ -83,6 +83,37 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
         except (httpx.HTTPError, Exception):
             return None
 
+    def normalize_rsu_status(rsu_id: str, status: Dict[str, Any]) -> Dict[str, Any]:
+        cloud_disconnected = bool(status.get("cloud_disconnected", not status.get("cloud_connected", True)))
+        forwarded_events = int(status.get("forwarded_events", status.get("forwarded_to_sqs", 0)))
+        local_alerts_count = int(status.get("local_alerts_count", status.get("local_edge_alerts", 0)))
+        relayed_cloud_alerts_count = int(
+            status.get("relayed_cloud_alerts_count", status.get("relayed_cloud_alerts", 0))
+        )
+        received_events = int(status.get("received_events", 0))
+        filtered_telemetry_count = int(status.get("filtered_telemetry_count", 0))
+        return {
+            **status,
+            "rsu_id": status.get("rsu_id", rsu_id),
+            "cloud_disconnected": cloud_disconnected,
+            "cloud_connected": not cloud_disconnected,
+            "forwarded_events": forwarded_events,
+            "forwarded_to_sqs": forwarded_events,
+            "local_alerts_count": local_alerts_count,
+            "local_edge_alerts": local_alerts_count,
+            "relayed_cloud_alerts_count": relayed_cloud_alerts_count,
+            "relayed_cloud_alerts": relayed_cloud_alerts_count,
+            "received_events": received_events,
+            "filtered_telemetry_count": filtered_telemetry_count,
+            "bandwidth_saved_pct": (
+                filtered_telemetry_count / received_events * 100 if received_events > 0 else 0.0
+            ),
+            "buffered_count": int(status.get("buffered_count", 0)),
+            "rejected_events": int(status.get("rejected_events", 0)),
+            "flushed_events_count": int(status.get("flushed_events_count", 0)),
+            "last_recovery_time_ms": int(status.get("last_recovery_time_ms", 0)),
+        }
+
     def inject_synthetic_event(event: V2XEvent) -> bool:
         processed, alert = storage.process_event(event)
         if processed and alert:
@@ -126,28 +157,13 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
         for rsu_id, rsu_url in [("rsu-1", settings.rsu_1_url), ("rsu-2", settings.rsu_2_url)]:
             rsu_status = await fetch_rsu_status(rsu_url)
             if rsu_status:
-                received = rsu_status.get("received_events", 0)
-                filtered = rsu_status.get("filtered_telemetry_count", 0)
-                bandwidth_saved_pct = (filtered / received * 100) if received > 0 else 0.0
-                rsu_nodes[rsu_id] = {
-                    **rsu_status,
-                    "bandwidth_saved_pct": bandwidth_saved_pct,
-                }
+                rsu_nodes[rsu_id] = normalize_rsu_status(rsu_id, rsu_status)
             else:
                 # Fallback: local state for demo/test mode
-                rsu_nodes[rsu_id] = {
+                rsu_nodes[rsu_id] = normalize_rsu_status(rsu_id, {
                     "rsu_id": rsu_id,
-                    "cloud_connected": not _rsu_states.get(rsu_id, {}).get("cloud_disconnected", False),
-                    "received_events": 0,
-                    "filtered_telemetry_count": 0,
-                    "forwarded_to_sqs": 0,
-                    "bandwidth_saved_pct": 0.0,
-                    "buffered_count": 0,
-                    "flushed_events_count": 0,
-                    "last_recovery_time_ms": 0,
-                    "local_edge_alerts": 0,
-                    "relayed_cloud_alerts": 0,
-                }
+                    "cloud_disconnected": _rsu_states.get(rsu_id, {}).get("cloud_disconnected", False),
+                })
         
         result["rsu_nodes"] = rsu_nodes
         return result
@@ -210,13 +226,14 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
             return {"status": "stored_locally", "rsu_id": rsu_id}
 
     @app.post("/api/control/simulate-scenario")
-    def simulate_scenario(payload: Dict[str, Any]):
+    async def simulate_scenario(payload: Dict[str, Any]):
         scenario = payload.get("scenario", "").lower()
         now = datetime.now(timezone.utc).isoformat()
-        
+        rsu_url = None
         events_to_inject = []
         
         if scenario == "emergency_corridor":
+            rsu_url = settings.rsu_2_url
             events_to_inject.append(V2XEvent(
                 event_id=f"demo-emergency-{now}",
                 source_id="veh-005",
@@ -225,6 +242,7 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
                 payload={"speed_kmh": 80, "siren_active": True, "target_lane": 2},
             ))
         elif scenario == "sudden_braking":
+            rsu_url = settings.rsu_1_url
             events_to_inject.append(V2XEvent(
                 event_id=f"demo-braking-{now}",
                 source_id="veh-001",
@@ -233,6 +251,7 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
                 payload={"speed_kmh": 45, "lane": 2, "deceleration_ms2": 7.5},
             ))
         elif scenario == "road_hazard":
+            rsu_url = settings.rsu_1_url
             events_to_inject.append(V2XEvent(
                 event_id=f"demo-hazard-{now}",
                 source_id="veh-002",
@@ -241,6 +260,7 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
                 payload={"hazard_type": "debris", "severity": "high"},
             ))
         elif scenario == "duplicate_burst":
+            rsu_url = settings.rsu_1_url
             base_event = V2XEvent(
                 event_id=f"demo-burst-{now}",
                 source_id="veh-003",
@@ -256,6 +276,12 @@ def create_app(settings: Optional[Settings] = None, storage: Optional[Storage] =
         for event in events_to_inject:
             if inject_synthetic_event(event):
                 injected_count += 1
+            try:
+                async with httpx.AsyncClient(timeout=0.4) as client:
+                    response = await client.post(f"{rsu_url}/api/events", json=event.model_dump(mode="json"))
+                    response.raise_for_status()
+            except httpx.HTTPError:
+                logger.warning("Could not forward demo event %s to RSU at %s", event.event_id, rsu_url)
         
         return {"status": "ok", "scenario": scenario, "events_injected": injected_count}
 

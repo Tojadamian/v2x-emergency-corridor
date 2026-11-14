@@ -1,0 +1,73 @@
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: v2x-mqtt
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  rsu-1:
+    build: .
+    image: v2x-service:local
+    container_name: rsu-1
+    command: ["uvicorn", "rsu_service.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    environment:
+      RSU_ID: rsu-1
+      ASSIGNED_SECTOR: sector-A12-tunnel
+      ENABLE_MQTT: "true"
+      MQTT_BROKER_HOST: mqtt
+      MQTT_BROKER_PORT: "1883"
+      SQS_QUEUE_URL: ${SQS_QUEUE_URL:-}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    depends_on:
+      - mqtt
+
+  rsu-2:
+    build: .
+    image: v2x-service:local
+    container_name: rsu-2
+    command: ["uvicorn", "rsu_service.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    ports:
+      - "8002:8002"
+    environment:
+      RSU_ID: rsu-2
+      ASSIGNED_SECTOR: sector-B04-bridge
+      ENABLE_MQTT: "true"
+      MQTT_BROKER_HOST: mqtt
+      MQTT_BROKER_PORT: "1883"
+      SQS_QUEUE_URL: ${SQS_QUEUE_URL:-}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    depends_on:
+      - mqtt
+
+  v2x-service:
+    build: .
+    image: v2x-service:local
+    container_name: v2x-service
+    ports:
+      - "8000:8000"
+    environment:
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-memory}
+      DYNAMODB_TABLE: v2x-events-store
+      SQS_QUEUE_URL: ${SQS_QUEUE_URL:-}
+      SNS_TOPIC_ARN: ${SNS_TOPIC_ARN:-}
+      RSU_1_URL: http://rsu-1:8001
+      RSU_2_URL: http://rsu-2:8002
+      RSU_ALERT_URLS: http://rsu-1:8001/sns/alerts,http://rsu-2:8002/sns/alerts
+      ENABLE_SQS_WORKER: ${ENABLE_SQS_WORKER:-false}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    depends_on:
+      - rsu-1
+      - rsu-2

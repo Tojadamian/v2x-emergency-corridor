@@ -5,6 +5,7 @@ const sectorGroups = {
   "sector-A12-tunnel": ["veh-001", "veh-002", "veh-003"],
   "sector-B04-bridge": ["veh-004", "veh-005"],
 };
+let latestRsuNodes = {};
 
 function addLine(parent, tag, text) {
   const element = document.createElement(tag);
@@ -49,6 +50,13 @@ function renderDigitalTwin(vehicles, activeCorridors) {
     const isEmergencyActive = activeCorridors.includes(sector);
 
     for (let lane = 1; lane <= 3; lane++) {
+      if (isEmergencyActive && lane === 2) {
+        const corridorBanner = document.createElement("div");
+        corridorBanner.className = "emergency-corridor-banner";
+        corridorBanner.textContent = "EMERGENCY CORRIDOR OPEN — LANE 1 PULL LEFT | LANES 2 & 3 PULL RIGHT";
+        lanesDiv.appendChild(corridorBanner);
+      }
+
       const laneDiv = document.createElement("div");
       laneDiv.className = "lane";
       if (isEmergencyActive && lane === 2) {
@@ -70,6 +78,10 @@ function renderDigitalTwin(vehicles, activeCorridors) {
           badge.className = "vehicle-badge";
           if (vId === "veh-005") badge.className += " ambulance";
           else if (state.event_type === "emergency_vehicle") badge.className += " emergency";
+          if (isEmergencyActive && lane === 1) badge.className += " pull-left";
+          if (isEmergencyActive && lane > 1 && vId !== "veh-005" && state.event_type !== "emergency_vehicle") {
+            badge.className += " pull-right";
+          }
 
           const speed = state.payload.speed_kmh ?? "—";
           badge.textContent = `${vId}: ${speed} km/h`;
@@ -158,8 +170,8 @@ function renderControlPanel() {
   container.replaceChildren();
 
   const controls = [
-    { label: "RSU-1 Cloud Disconnect", action: "toggle-rsu-1" },
-    { label: "RSU-2 Cloud Disconnect", action: "toggle-rsu-2" },
+    { rsuId: "rsu-1", action: "toggle-rsu-1" },
+    { rsuId: "rsu-2", action: "toggle-rsu-2" },
     { label: "Trigger Ambulance Corridor", action: "scenario-emergency_corridor" },
     { label: "Trigger Severe Braking", action: "scenario-sudden_braking" },
     { label: "Trigger Road Hazard", action: "scenario-road_hazard" },
@@ -167,10 +179,14 @@ function renderControlPanel() {
     { label: "Reset All Metrics", action: "reset", className: "danger" },
   ];
 
-  controls.forEach(({ label, action, className }) => {
+  controls.forEach(({ rsuId, label, action, className }) => {
+    const disconnected = rsuId ? Boolean(latestRsuNodes[rsuId]?.cloud_disconnected) : false;
+    const buttonLabel = rsuId
+      ? `${rsuId.toUpperCase()} ${disconnected ? "Reconnect Cloud" : "Cloud Disconnect"}`
+      : label;
     const btn = document.createElement("button");
-    btn.textContent = label;
-    btn.className = className || "";
+    btn.textContent = buttonLabel;
+    btn.className = [className || "", rsuId && disconnected ? "active" : ""].filter(Boolean).join(" ");
     btn.onclick = () => handleControl(action);
     container.appendChild(btn);
   });
@@ -180,17 +196,15 @@ async function handleControl(action) {
   try {
     if (action.startsWith("toggle-rsu-")) {
       const rsuId = action === "toggle-rsu-1" ? "rsu-1" : "rsu-2";
-      const disconnected = !event.target.classList.contains("active");
+      const currentDisconnected = Boolean(latestRsuNodes[rsuId]?.cloud_disconnected);
+      const disconnected = !currentDisconnected;
       const response = await fetch("/api/control/rsu-disconnection", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rsu_id: rsuId, disconnected }),
       });
-      if (response.ok) {
-        const btn = event.target;
-        btn.classList.toggle("active");
-        btn.textContent = disconnected ? `${rsuId.toUpperCase()} Reconnect` : `${rsuId.toUpperCase()} Cloud Disconnect`;
-      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      await update();
     } else if (action.startsWith("scenario-")) {
       const scenario = action.replace("scenario-", "");
       const response = await fetch("/api/control/simulate-scenario", {
@@ -236,6 +250,7 @@ async function update() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     const corridors = data.active_emergency_corridors;
+    latestRsuNodes = data.rsu_nodes || {};
     byId("connection").textContent = "Live";
     byId("connection").classList.remove("offline");
     byId("processed").textContent = data.processed_events;
