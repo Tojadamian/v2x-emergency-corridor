@@ -156,3 +156,83 @@ def test_live_url_invokes_remote_runner(monkeypatch, tmp_path):
     assert calls == [("http://deployment/api/experiments/run", 120)]
     assert json.loads((tmp_path / "dev_notes/experiment_results.json").read_text()) == expected
     assert "remote deployment" in (tmp_path / "EXPERIMENT_RESULTS.md").read_text()
+
+
+def test_deliverable_documentation_exists_and_covers_architecture_and_schemas():
+    documentation_paths = {
+        name: ROOT / name
+        for name in (
+            "DELIVERABLE_2_DOCUMENTATION.md",
+            "EXPERIMENT_RESULTS.md",
+            "MVP_DOCUMENTATION.md",
+        )
+    }
+    assert all(path.is_file() for path in documentation_paths.values())
+
+    deliverable_2 = documentation_paths["DELIVERABLE_2_DOCUMENTATION.md"].read_text(
+        encoding="utf-8"
+    )
+    for section in (
+        "## 1. End-to-End Distributed Architecture (Figure 1 Implementation)",
+        "## 2. Event & Alert Schemas",
+        "## 3. Messaging Configuration, QoS, Idempotency & Edge Buffering Justification",
+        "## 4. Summary of Controlled Experiments",
+        "## 5. Reproducible Deployment & Demonstration Runbook",
+        "OBUs -> MQTT -> RSU-1 / RSU-2 -> SQS v2x-events -> V2X-SERVICE -> DynamoDB",
+        "GitHub Actions -> pytest -> Docker build -> Amazon ECR + S3 bundle -> EC2 vdeploy",
+        "sector-A12-tunnel",
+        "sector-B04-bridge",
+        "veh-001",
+        "veh-005",
+    ):
+        assert section in deliverable_2
+
+    for field in (
+        "event_id",
+        "source_id",
+        "event_type",
+        "event_time",
+        "location",
+        "rsu_id",
+        "seq_num",
+        "payload",
+    ):
+        assert f"`{field}`" in deliverable_2
+    for field in (
+        "alert_id",
+        "alert_type",
+        "severity",
+        "origin",
+        "rsu_id",
+        "location",
+        "triggered_by_event_id",
+        "source_id",
+        "created_at",
+        "message",
+        "action_instruction",
+    ):
+        assert f"`{field}`" in deliverable_2
+    for event_type in (
+        "traffic_telemetry",
+        "sudden_braking",
+        "emergency_vehicle",
+        "road_hazard",
+        "traffic_density",
+    ):
+        assert f"`{event_type}`" in deliverable_2
+
+    experiment_results = documentation_paths["EXPERIMENT_RESULTS.md"].read_text(
+        encoding="utf-8"
+    )
+    for section in (
+        "## Experiment 1: Delivery Anomalies",
+        "## Experiment 2: Edge-Cloud Disconnection",
+        "## Experiment 3: Component Failure",
+        "## Experiment 4: Load Increase",
+    ):
+        assert section in experiment_results
+
+    mvp_documentation = documentation_paths["MVP_DOCUMENTATION.md"].read_text(
+        encoding="utf-8"
+    )
+    assert "## 1. System Architecture & Data Flow" in mvp_documentation

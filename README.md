@@ -1,54 +1,63 @@
-# V2X Emergency Corridor MVP
+# V2X Emergency Corridor
 
-## Local setup
+A distributed vehicle-to-everything monitoring and alerting system for an emergency corridor scenario. The project includes the Deliverable 1 MVP, Deliverable 2 RSU edge/cloud continuum, a dashboard Digital Twin, deployment automation, and controlled experiments.
 
-Use Python 3.11, as in the container and CI (local tests also run on Python 3.9):
+## Documentation
+
+- [MVP documentation](./MVP_DOCUMENTATION.md) — Deliverable 1 architecture, configuration, and runbook.
+- [Deliverable 2 documentation](./DELIVERABLE_2_DOCUMENTATION.md) — distributed architecture, schemas, messaging, experiment findings, deployment, and demonstrations.
+- [Experiment results](./EXPERIMENT_RESULTS.md) — methodology, complete results tables, and measurement limitations.
+
+## Quick start
+
+The commands below assume the project virtual environment and dependencies are available. Install project dependencies with `./.venv/bin/pip install -r requirements.txt`.
+
+### Deliverable 1: MVP service
+
+Start the cloud service and send simulator events directly over HTTP:
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn v2x_service.main:app --host 0.0.0.0 --port 8000
+STORAGE_BACKEND=memory ./.venv/bin/python -m uvicorn v2x_service.main:app \
+  --host 0.0.0.0 --port 8000
 ```
 
-Open http://localhost:8000. In another terminal, run:
+In another terminal:
 
 ```sh
-source .venv/bin/activate
-python simulator/obu_simulator.py --mode http --rate 2
+./.venv/bin/python simulator/obu_simulator.py \
+  --mode http --http-url http://127.0.0.1:8000/api/events/ingest --rate 2
 ```
 
-The rate is the total number of events per second across the five vehicles. Use `--http-url` to target another service. Run tests with `python -m pytest`.
+Open [http://localhost:8000](http://localhost:8000) for the dashboard. Stop the simulator with Ctrl-C.
 
-Use `--roam-sectors` to alternate each vehicle's successive events between the tunnel and bridge, routed to the corresponding RSU. Without it, each vehicle keeps its default sector.
+### Deliverable 2: local distributed stack
 
-## AWS configuration
+Start Mosquitto, both RSUs, and the cloud service:
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `AWS_DEFAULT_REGION` | `us-east-1` | AWS region |
-| `STORAGE_BACKEND` | `memory` | `memory` or `dynamodb` |
-| `DYNAMODB_TABLE` | `v2x-events-store` | DynamoDB table name |
-| `ENABLE_SQS_WORKER` | `false` | Set to `true` to consume SQS |
-| `SQS_QUEUE_URL` | empty | Required when the worker is enabled |
-| `S3_STATIC_BASE_URL` | empty | Optional HTTP(S) base URL for dashboard assets |
+```sh
+docker compose up --build -d
+docker compose ps
+curl http://localhost:8000/health
+```
 
-Create a DynamoDB table with a string partition key named `event_id`, and an SQS Standard queue named `v2x-events`. Provide AWS Academy credentials through the normal AWS credential chain, including `AWS_SESSION_TOKEN` for temporary credentials. The service needs DynamoDB GetItem, PutItem, Scan and UpdateItem permissions, and SQS ReceiveMessage and DeleteMessage permissions. Run the simulator with `python simulator/obu_simulator.py --mode sqs --queue-url <queue-url> --rate 2`; it needs SQS SendMessage permission.
+Publish simulator events to the local MQTT broker:
 
-The service provides `/api/summary`, `/api/state`, `/api/events`, `/api/alerts`, and `POST /api/events/ingest`, as well as static files under `/ui`. The summary retains the most recent 50 events and alerts, with counts across all stored events. Dashboard state is reconstructed from all stored events, so the DynamoDB implementation scans the table and is intended for MVP-scale datasets. Memory storage is process-local and is lost on restart; use DynamoDB for persistent or multi-instance deployments.
+```sh
+./.venv/bin/python simulator/obu_simulator.py \
+  --mode mqtt --mqtt-host 127.0.0.1 --rate 2 --iterations 5
+```
 
-Event timestamps must include a timezone. Vehicle state is the event with the latest timestamp for each source. A corridor is active while a vehicle's latest event generated an emergency corridor alert; a later event without such an alert clears it. Emergency events with an active siren generate an alert, as does an ambulance entering a segment containing other vehicles. Alerts remain in history. Segment speed is the mean of the latest reported speeds for vehicles in that segment. Concurrent DynamoDB writers commit each event and its alert atomically and suppress duplicate event IDs; rule evaluation uses the current scan snapshot and is not serialized across different events.
+The default Compose configuration is AWS-independent: the service uses in-memory storage and its SQS worker is disabled. Local MQTT ingestion and RSU alerts work; configure AWS queue, topic, storage, and credentials to exercise cloud forwarding and persistence. See the [Deliverable 2 runbook](./DELIVERABLE_2_DOCUMENTATION.md#5-reproducible-deployment--demonstration-runbook) for AWS-connected Compose, EC2 deployment, and anomaly-injection demonstrations.
 
-The highway map tracks vehicle state independently in both sectors. Each sector starts with four passenger vehicles in normal traffic; the ambulance remains on standby until a corridor is triggered there. Use each sector's action menu to trigger an emergency corridor, sudden braking, a road hazard, normal traffic, or a duplicate burst. These actions can also be requested through `POST /api/control/simulate-scenario` with an optional `sector` field; omitting it retains the scenario's default sector. Use the dashboard's Day Mode/Night Mode button to switch themes; the selection is saved in browser storage.
+Stop the stack with `docker compose down`.
 
-Invalid SQS messages are logged and deleted; transient processing failures are logged and left on the queue for retry. Configure an SQS dead-letter queue for repeatedly failing valid messages. The worker long-polls for five seconds and handles up to ten messages per receive.
+## Verification
 
-## Controlled experiments
+Run the complete test suite and the isolated automated experiment runner:
 
-Run `./.venv/bin/python -m experiments.run_experiments` to execute all four isolated experiment families. Results are saved to `dev_notes/experiment_results.json` and `EXPERIMENT_RESULTS.md`. The service also exposes `POST /api/experiments/run`; use `--live-url http://host:8000` to invoke that endpoint on a deployed service and save its results locally. This option executes the same isolated in-process simulation on the deployment: it does not exercise the deployment's real SQS, DynamoDB, MQTT, RSUs, network, or operational state. Alert delivery is disabled for these experiments. Fixed workloads are reproducible, but measured times and process peak memory vary. The generated report describes the metrics and limitations.
+```sh
+./.venv/bin/pytest -q
+./.venv/bin/python -m experiments.run_experiments
+```
 
-## EC2 deployment
-
-Install Docker and the AWS CLI on the EC2 instance, grant its AWS credentials access to ECR, SQS and DynamoDB, and run `deploy/deploy_ec2.sh [image-tag]` (default: `latest`). The script resolves the account and queue, pulls the image, and replaces the `v2x-service` container. Publish the image to ECR before deploying. It uses the instance role if no credentials are supplied; IMDSv2 access from a bridged container may require a metadata hop limit of at least 2. Alternatively, it passes explicitly exported AWS credential variables or mounts existing AWS shared credentials and config files read-only, including the selected `AWS_PROFILE`. Temporary credentials expire and must be refreshed. The container has access to any mounted credentials.
-
-The script defaults `S3_STATIC_BASE_URL` to the account's S3 static path; inaccessible S3 assets fall back to `/ui` on the service. An EC2 security group must allow inbound TCP port 8000 from intended clients. The API has no authentication; restrict access accordingly.
+See [EXPERIMENT_RESULTS.md](./EXPERIMENT_RESULTS.md) for the generated metrics and caveats.
