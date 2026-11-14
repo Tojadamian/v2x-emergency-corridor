@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
-from typing import Any, Dict, Literal
+from typing import Any, Dict, Literal, Optional
 from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator, model_validator
 import math
 
-EventType = Literal["traffic_telemetry", "sudden_braking", "emergency_vehicle"]
+EventType = Literal["traffic_telemetry", "sudden_braking", "emergency_vehicle", "road_hazard", "traffic_density"]
 
 class V2XEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: f"evt-{uuid4().hex}", min_length=1)
@@ -17,6 +17,8 @@ class V2XEvent(BaseModel):
     payload: Dict[str, Any] = Field(
         ..., description="Speed, lane, deceleration_ms2, density, or emergency attributes"
     )
+    rsu_id: Optional[str] = None
+    seq_num: Optional[int] = None
 
     @field_validator("event_id")
     @classmethod
@@ -58,7 +60,7 @@ class V2XEvent(BaseModel):
 
 class V2XAlert(BaseModel):
     alert_id: str = Field(default_factory=lambda: f"alt-{uuid4().hex}")
-    alert_type: Literal["EMERGENCY_CORRIDOR_ALERT", "SEVERE_BRAKING_CONGESTION_ALERT"]
+    alert_type: Literal["EMERGENCY_CORRIDOR_ALERT", "SEVERE_BRAKING_CONGESTION_ALERT", "LOCAL_EMERGENCY_CORRIDOR_ALERT", "LOCAL_COLLISION_RISK_ALERT", "LOCAL_ROAD_HAZARD_ALERT"]
     severity: Literal["WARNING", "CRITICAL"]
     location: str
     triggered_by_event_id: str
@@ -68,3 +70,5 @@ class V2XAlert(BaseModel):
     )
     message: str
     action_instruction: str
+    origin: str = "cloud"
+    rsu_id: Optional[str] = None
