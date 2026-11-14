@@ -1,5 +1,6 @@
 import argparse
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import json
 import math
 import os
@@ -191,8 +192,8 @@ def _mqtt_alert_callback(client, userdata, message) -> None:
     )
 
 
-def _mqtt_connect_callback(client, userdata, flags, reason_code, properties) -> None:
-    client.subscribe("v2x/+/alerts/#")
+def _mqtt_connect_callback(client, userdata, flags, reason_code, properties, *, qos=1) -> None:
+    client.subscribe("v2x/+/alerts/#", qos=qos)
 
 
 def main() -> None:
@@ -203,6 +204,7 @@ def main() -> None:
     parser.add_argument("--http-url", default="http://127.0.0.1:8000/api/events/ingest")
     parser.add_argument("--mqtt-host", default="127.0.0.1")
     parser.add_argument("--mqtt-port", type=int, default=1883)
+    parser.add_argument("--mqtt-qos", type=int, choices=(0, 1, 2), default=1)
     parser.add_argument("--rsu1-url", default="http://127.0.0.1:8001")
     parser.add_argument("--rsu2-url", default="http://127.0.0.1:8002")
     parser.add_argument("--delay-ms", type=int, default=0)
@@ -242,7 +244,7 @@ def main() -> None:
         import paho.mqtt.client as mqtt
 
         mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        mqtt_client.on_connect = _mqtt_connect_callback
+        mqtt_client.on_connect = partial(_mqtt_connect_callback, qos=args.mqtt_qos)
         mqtt_client.on_message = _mqtt_alert_callback
         mqtt_client.connect(args.mqtt_host, args.mqtt_port, keepalive=60)
         mqtt_client.loop_start()
@@ -252,7 +254,7 @@ def main() -> None:
         if sqs_client:
             sqs_client.send_message(QueueUrl=queue_url, MessageBody=body)
         elif args.mode == "mqtt":
-            result = mqtt_client.publish(f"v2x/{event.rsu_id}/telemetry", body)
+            result = mqtt_client.publish(f"v2x/{event.rsu_id}/telemetry", body, qos=args.mqtt_qos)
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
                 raise RuntimeError(f"MQTT publish failed with result code {result.rc}")
         elif args.mode == "rsu-http":

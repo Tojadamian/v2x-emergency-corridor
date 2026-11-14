@@ -24,6 +24,7 @@ SNS_TOPIC_ARN=$(aws sns create-topic \
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+RSU_IMAGE_URI="${ECR_REGISTRY}/v2x-rsu:${IMAGE_TAG}"
 S3_BUCKET="v2x-mvp-assets-${ACCOUNT_ID}"
 S3_STATIC_BASE_URL="${S3_STATIC_BASE_URL:-https://${S3_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/static}"
 
@@ -45,9 +46,12 @@ echo "[2/6] Logging in to Amazon ECR (${ECR_REGISTRY})..."
 aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" |
   docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
-echo "[3/6] Pulling ${IMAGE_URI} and preparing the shared RSU image tag..."
+echo "[3/6] Pulling cloud and RSU images..."
 docker pull "${IMAGE_URI}"
-docker tag "${IMAGE_URI}" "v2x-rsu:latest"
+if ! docker pull "${RSU_IMAGE_URI}"; then
+  echo "Warning: Could not pull ${RSU_IMAGE_URI}; using ${IMAGE_URI} for RSUs." >&2
+  RSU_IMAGE_URI="${IMAGE_URI}"
+fi
 
 if ! docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1; then
   docker network create "${NETWORK_NAME}" >/dev/null
@@ -82,7 +86,7 @@ docker run -d \
   -e SQS_QUEUE_URL="${SQS_QUEUE_URL}" \
   -e AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION}" \
   "${credential_options[@]}" \
-  "v2x-rsu:latest" \
+  "${RSU_IMAGE_URI}" \
   uvicorn rsu_service.main:app --host 0.0.0.0 --port 8001 >/dev/null
 
 docker run -d \
@@ -98,7 +102,7 @@ docker run -d \
   -e SQS_QUEUE_URL="${SQS_QUEUE_URL}" \
   -e AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION}" \
   "${credential_options[@]}" \
-  "v2x-rsu:latest" \
+  "${RSU_IMAGE_URI}" \
   uvicorn rsu_service.main:app --host 0.0.0.0 --port 8002 >/dev/null
 
 echo "[5/6] Starting the cloud service..."

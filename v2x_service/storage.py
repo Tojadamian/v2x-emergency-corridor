@@ -300,4 +300,13 @@ class DynamoDBStorage:
         self._metrics.record_sns_alert()
 
     def reset(self) -> None:
+        params: Dict[str, Any] = {"ProjectionExpression": "event_id", "ConsistentRead": True}
+        while True:
+            response = self.table.scan(**params)
+            for item in response.get("Items", []):
+                self.table.delete_item(Key={"event_id": item["event_id"]})
+            key = response.get("LastEvaluatedKey")
+            if not key:
+                break
+            params["ExclusiveStartKey"] = key
         self._metrics.reset()

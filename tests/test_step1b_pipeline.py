@@ -81,8 +81,8 @@ def test_rsu_mqtt_subscribes_to_both_telemetry_topics():
     client = MQTTClient()
     rsu_main._mqtt_on_connect(client, None, None, 0, None)
     assert client.topics == [
-        ("v2x/rsu-1/telemetry", 0),
-        ("v2x/telemetry/rsu-1", 0),
+        ("v2x/rsu-1/telemetry", 1),
+        ("v2x/telemetry/rsu-1", 1),
     ]
 
 

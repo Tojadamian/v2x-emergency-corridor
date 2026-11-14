@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import boto3
 import httpx
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from common.schemas import V2XEvent
@@ -151,6 +151,10 @@ def create_app(
 
     app = FastAPI(title="V2X Emergency Corridor", lifespan=lifespan)
     app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return Response(status_code=204)
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard():

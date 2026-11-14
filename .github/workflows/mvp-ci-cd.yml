@@ -27,7 +27,9 @@ jobs:
       - name: Run full pytest suite
         env:
           STORAGE_BACKEND: memory
-        run: PYTHONPATH=. ./.venv/bin/pytest -q tests/
+        run: |
+          PYTHONPATH=. ./.venv/bin/pytest -q tests/
+          PYTHONPATH=. ./.venv/bin/python -m experiments.run_experiments
 
   build-and-publish:
     name: Publish Image to ECR & Static Files to S3
@@ -49,14 +51,22 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push V2X-SERVICE Docker image to Amazon ECR
+      - name: Build and publish cloud and RSU images to Amazon ECR
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $REGISTRY/$ECR_REPOSITORY:latest .
-          docker push $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $REGISTRY/$ECR_REPOSITORY:latest
+          for repository in "$ECR_REPOSITORY" v2x-rsu; do
+            aws ecr describe-repositories --repository-names "$repository" ||
+              aws ecr create-repository --repository-name "$repository"
+          done
+          docker build \
+            -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" -t "$REGISTRY/$ECR_REPOSITORY:latest" \
+            -t "$REGISTRY/v2x-rsu:$IMAGE_TAG" -t "$REGISTRY/v2x-rsu:latest" .
+          for repository in "$ECR_REPOSITORY" v2x-rsu; do
+            docker push "$REGISTRY/$repository:$IMAGE_TAG"
+            docker push "$REGISTRY/$repository:latest"
+          done
 
       - name: Sync Static Dashboard Assets & Deployment Bundle to Amazon S3
         env:

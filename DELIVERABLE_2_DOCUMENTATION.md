@@ -17,8 +17,8 @@ The implementation has three cooperating paths:
    - Cloud alerts are published to SNS topic `v2x-alerts`. RSU `/sns/alerts` endpoints handle SNS `SubscriptionConfirmation` and notifications, then publish the alert to the RSU's MQTT alert topics for OBU subscribers.
    - The cloud service also attempts direct HTTP relay to configured RSU endpoints. This is an additional relay path when SNS subscription delivery is unavailable, rather than a replacement for SNS.
 3. **DevOps Path:** `GitHub Actions -> pytest -> Docker build -> Amazon ECR + S3 bundle -> EC2 vdeploy`
-   - GitHub Actions runs the complete test suite before its push pipeline builds the shared Docker image.
-   - The image is pushed to Amazon ECR; dashboard assets and deployment scripts are synchronized to S3.
+   - GitHub Actions runs the complete test suite and controlled experiments before its push pipeline builds the shared Docker image.
+   - The image is pushed to both `v2x-service` and `v2x-rsu` repositories in Amazon ECR; dashboard assets and deployment scripts are synchronized to S3.
    - On EC2, `vdeploy` (when configured on the host) or `deploy/deploy_ec2.sh` installs/replaces the cloud and RSU containers and configures the MQTT broker and AWS messaging resources.
 
 ### Vehicle-to-sector topology
@@ -224,7 +224,7 @@ MQTT is a lightweight publish/subscribe protocol suited to vehicle-to-RSU links:
 
 The RSU also accepts the legacy telemetry form `v2x/telemetry/{rsu_id}`. OBU simulators subscribe to `v2x/+/alerts/#` to receive alerts from either RSU.
 
-MQTT currently uses QoS 0 for subscription and publishes (best effort, at most once). This minimizes edge delivery overhead but does not guarantee delivery across the OBU-to-RSU link. `seq_num` tracking helps detect sequence gaps and timestamp-based reordering; it cannot recover a message lost before RSU receipt. Once received and selected for forwarding, events use SQS and edge buffering for stronger cloud-path resilience.
+MQTT publishes and subscriptions use QoS 1 (at-least-once delivery) by default. Configure the RSU with `MQTT_QOS` and the simulator with `--mqtt-qos` (0, 1, or 2); actual delivery QoS is limited by both the publisher and subscription settings. QoS 1 can deliver duplicates, which the RSU suppresses by `event_id` during its process lifetime. `seq_num` tracking helps detect sequence gaps and timestamp-based reordering; it cannot recover a message lost before RSU receipt. MQTT delivery depends on connectivity and session behavior; once received and selected for forwarding, events use SQS and edge buffering for stronger cloud-path resilience.
 
 ### Amazon SQS Standard: `v2x-events`
 
@@ -286,7 +286,7 @@ The stack consists of Mosquitto, `rsu-1`, `rsu-2`, and `v2x-service`. With defau
 ### C. Deploy the complete system on Amazon EC2
 
 1. Use AWS Academy credentials in `us-east-1` and ensure ECR, S3, EC2, SQS, SNS, and DynamoDB permissions are available. The EC2 instance needs Docker, AWS CLI access (preferably through an instance role), inbound rules for the dashboard/API port 8000, and RSU ports 8001/8002 as required by the deployment.
-2. Ensure the ECR repository `v2x-service` and DynamoDB table `v2x-events-store` exist. The table partition key is string `event_id`. The deployment script creates the SQS Standard queue `v2x-events` and SNS topic `v2x-alerts`, then starts the MQTT broker, both RSUs, and the cloud service.
+2. Ensure the ECR repositories `v2x-service` and `v2x-rsu` and DynamoDB table `v2x-events-store` exist. The table partition key is string `event_id`. The deployment script creates the SQS Standard queue `v2x-events` and SNS topic `v2x-alerts`, then starts the MQTT broker, both RSUs, and the cloud service.
 3. Build and publish the service image from a machine with Docker and AWS CLI access:
 
    ```sh
@@ -298,9 +298,13 @@ The stack consists of Mosquitto, `rsu-1`, `rsu-2`, and `v2x-service`. With defau
      | docker login --username AWS --password-stdin "$ECR_REGISTRY"
    docker build \
      -t "$ECR_REGISTRY/v2x-service:$IMAGE_TAG" \
-     -t "$ECR_REGISTRY/v2x-service:latest" .
+     -t "$ECR_REGISTRY/v2x-service:latest" \
+     -t "$ECR_REGISTRY/v2x-rsu:$IMAGE_TAG" \
+     -t "$ECR_REGISTRY/v2x-rsu:latest" .
    docker push "$ECR_REGISTRY/v2x-service:$IMAGE_TAG"
    docker push "$ECR_REGISTRY/v2x-service:latest"
+   docker push "$ECR_REGISTRY/v2x-rsu:$IMAGE_TAG"
+   docker push "$ECR_REGISTRY/v2x-rsu:latest"
    ```
 
 4. On EC2, use the configured `vdeploy` helper if present. Otherwise, copy the deployment script from the deployment bundle or check out the repository, then run:
@@ -309,7 +313,7 @@ The stack consists of Mosquitto, `rsu-1`, `rsu-2`, and `v2x-service`. With defau
    ./deploy/deploy_ec2.sh
    ```
 
-   The script deploys the `latest` tag by default and also accepts an explicit image tag. It creates or reuses the shared Docker network and replaces the four containers. It attempts external SNS HTTP subscriptions when it can determine the instance's public IP; direct RSU HTTP alert relay is configured as well.
+   The script deploys the `latest` tag by default and also accepts an explicit image tag. If the RSU image cannot be pulled, it warns and uses the cloud service image for the RSUs. It creates or reuses the shared Docker network and replaces the four containers. It attempts external SNS HTTP subscriptions when it can determine the instance's public IP; direct RSU HTTP alert relay is configured as well.
 5. Open `http://<EC2-PUBLIC-IP>:8000`. Verify the dashboard, service health, and containers with `curl http://localhost:8000/health` and `docker ps`.
 
 The GitHub Actions push pipeline builds and pushes `latest` and the commit-SHA tag to ECR and syncs `static/` and `deploy/` to the configured S3 bucket. Temporary credentials expire and must be refreshed before later deployment operations.

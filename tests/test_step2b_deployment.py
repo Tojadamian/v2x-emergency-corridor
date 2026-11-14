@@ -1,14 +1,154 @@
 from pathlib import Path
+import os
+import subprocess
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 import pytest
 
+from rsu_service import main as rsu_main
+from simulator import obu_simulator
 from v2x_service.config import Settings
 from v2x_service.main import create_app
-from v2x_service.storage import InMemoryStorage
+from v2x_service.storage import DynamoDBStorage, InMemoryStorage, METRICS_KEY
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_dynamodb_reset_deletes_all_pages_and_duplicate_counter():
+    items = {
+        "event-1": {"event_id": "event-1", "event": {}, "alert": {}},
+        "event-2": {"event_id": "event-2", "event": {}},
+        METRICS_KEY: {"event_id": METRICS_KEY, "duplicates_ignored": 2},
+    }
+    table = MagicMock()
+    table.scan.side_effect = [
+        {"Items": [items["event-1"]], "LastEvaluatedKey": {"event_id": "event-1"}},
+        {"Items": [items["event-2"], items[METRICS_KEY]]},
+    ]
+    table.delete_item.side_effect = lambda Key: items.pop(Key["event_id"])
+    storage = DynamoDBStorage("test", table=table)
+    storage._metrics.record_sns_alert()
+
+    storage.reset()
+
+    assert table.scan.call_count == 2
+    assert table.scan.call_args_list[1].kwargs["ExclusiveStartKey"] == {"event_id": "event-1"}
+    assert {call.kwargs["Key"]["event_id"] for call in table.delete_item.call_args_list} == {
+        "event-1", "event-2", METRICS_KEY,
+    }
+    assert items == {}
+    assert storage._metrics.summary()["sns_alerts_published"] == 0
+
+
+def test_dynamodb_reset_surfaces_delete_failure():
+    table = MagicMock()
+    table.scan.return_value = {"Items": [{"event_id": "event-1"}]}
+    table.delete_item.side_effect = RuntimeError("delete failed")
+    storage = DynamoDBStorage("test", table=table)
+    storage._metrics.record_sns_alert()
+    with pytest.raises(RuntimeError, match="delete failed"):
+        storage.reset()
+    assert storage._metrics.summary()["sns_alerts_published"] == 1
+
+
+def test_favicon_is_empty_and_not_in_openapi():
+    app = create_app(settings=Settings(storage_backend="memory"), storage=InMemoryStorage())
+    client = TestClient(app)
+    response = client.get("/favicon.ico")
+    assert response.status_code == 204
+    assert response.content == b""
+    assert "/favicon.ico" not in client.get("/openapi.json").json()["paths"]
+
+
+@pytest.mark.parametrize("qos", [1, 0, 2])
+def test_rsu_mqtt_qos_for_subscriptions_and_alerts(monkeypatch, qos):
+    if qos == 1:
+        assert rsu_main.MQTT_QOS == 1
+    monkeypatch.setattr(rsu_main, "MQTT_QOS", qos)
+    client = MagicMock()
+    monkeypatch.setattr(rsu_main, "mqtt_client", client)
+    client.publish.return_value.rc = 0
+
+    rsu_main._mqtt_on_connect(client, None, None, 0, None)
+    rsu_main.publish_mqtt("v2x/rsu-1/alerts", {"alert": True})
+
+    client.subscribe.assert_called_once_with([
+        (f"v2x/{rsu_main.rsu_id}/telemetry", qos),
+        (f"v2x/telemetry/{rsu_main.rsu_id}", qos),
+    ])
+    assert client.publish.call_args.kwargs["qos"] == qos
+
+
+@pytest.mark.parametrize(("qos_args", "expected_qos"), [([], 1), (["--mqtt-qos", "0"], 0), (["--mqtt-qos", "2"], 2)])
+def test_simulator_mqtt_qos_for_subscriptions_and_events(monkeypatch, qos_args, expected_qos):
+    client = MagicMock()
+    client.publish.return_value.rc = 0
+    client.connect.side_effect = lambda *args, **kwargs: client.on_connect(client, None, None, 0, None)
+    monkeypatch.setattr(sys, "argv", ["obu_simulator", "--mode", "mqtt", "--iterations", "1", *qos_args])
+    monkeypatch.setattr(obu_simulator.time, "sleep", lambda _: None)
+    with patch("paho.mqtt.client.Client", return_value=client):
+        obu_simulator.main()
+    client.subscribe.assert_called_once_with("v2x/+/alerts/#", qos=expected_qos)
+    assert client.publish.call_args.kwargs["qos"] == expected_qos
+
+
+def test_ci_publishes_dedicated_rsu_image():
+    workflow = (ROOT / ".github" / "workflows" / "mvp-ci-cd.yml").read_text(encoding="utf-8")
+    assert "v2x-rsu" in workflow
+
+
+@pytest.mark.parametrize("rsu_pull_fails", [False, True])
+def test_ec2_deploy_selects_rsu_image_or_cloud_fallback(tmp_path, rsu_pull_fails):
+    log = tmp_path / "docker.log"
+    aws = tmp_path / "aws"
+    aws.write_text(
+        '#!/bin/bash\n'
+        'case "$1 $2" in\n'
+        '  "sqs create-queue") echo queue-url ;;\n'
+        '  "sns create-topic") echo topic-arn ;;\n'
+        '  "sts get-caller-identity") echo 123456789012 ;;\n'
+        '  "ecr get-login-password") echo password ;;\n'
+        'esac\n',
+        encoding="utf-8",
+    )
+    docker = tmp_path / "docker"
+    docker.write_text(
+        '#!/bin/bash\n'
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'if [[ "$1" == pull && "$2" == */v2x-rsu:* && "$RSU_PULL_FAIL" == 1 ]]; then exit 1; fi\n',
+        encoding="utf-8",
+    )
+    aws.chmod(0o755)
+    docker.chmod(0o755)
+    script = tmp_path / "deploy_ec2.sh"
+    script.write_text(
+        (ROOT / "deploy" / "deploy_ec2.sh").read_text(encoding="utf-8").replace(
+            "/tmp/mosquitto.conf", str(tmp_path / "mosquitto.conf")
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "DOCKER_LOG": str(log),
+        "RSU_PULL_FAIL": str(int(rsu_pull_fails)),
+        "EC2_PUBLIC_IP": "192.0.2.1",
+        "HOME": str(tmp_path),
+        "AWS_PROFILE": "test-profile",
+    }
+    result = subprocess.run(
+        ["bash", str(script), "test-tag"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    commands = log.read_text(encoding="utf-8").splitlines()
+    registry = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+    assert f"pull {registry}/v2x-rsu:test-tag" in commands
+    expected_image = f"{registry}/{'v2x-service' if rsu_pull_fails else 'v2x-rsu'}:test-tag"
+    for rsu in ("rsu-1", "rsu-2"):
+        run = next(command for command in commands if f"--name {rsu} " in command)
+        assert f" {expected_image} uvicorn " in run
+    assert ("Warning: Could not pull" in result.stderr) is rsu_pull_fails
 
 
 @pytest.mark.parametrize(

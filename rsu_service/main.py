@@ -20,6 +20,7 @@ rsu_id = os.getenv("RSU_ID", "rsu-1")
 assigned_sector = os.getenv("ASSIGNED_SECTOR", "sector-A12-tunnel")
 mqtt_broker_host = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
 mqtt_broker_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
+MQTT_QOS = int(os.getenv("MQTT_QOS", "1"))
 enable_mqtt = os.getenv("ENABLE_MQTT", "false").lower() == "true"
 sqs_queue_url = os.getenv("SQS_QUEUE_URL", "")
 aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
@@ -50,7 +51,7 @@ def publish_mqtt(topic: str, payload: dict) -> None:
     """Publish message to MQTT topic."""
     if mqtt_client:
         try:
-            result = mqtt_client.publish(topic, json.dumps(payload))
+            result = mqtt_client.publish(topic, json.dumps(payload), qos=MQTT_QOS)
             if result.rc != 0:
                 logger.error("MQTT publish failed for topic %s with result code %s", topic, result.rc)
         except Exception:
@@ -104,8 +105,8 @@ def handle_mqtt_payload(payload: bytes) -> Optional[dict]:
 def _mqtt_on_connect(client, userdata, flags, reason_code, properties) -> None:
     client.subscribe(
         [
-            (f"v2x/{rsu_id}/telemetry", 0),
-            (f"v2x/telemetry/{rsu_id}", 0),
+            (f"v2x/{rsu_id}/telemetry", MQTT_QOS),
+            (f"v2x/telemetry/{rsu_id}", MQTT_QOS),
         ]
     )
 
