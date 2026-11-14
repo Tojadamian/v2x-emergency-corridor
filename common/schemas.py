@@ -60,7 +60,14 @@ class V2XEvent(BaseModel):
 
 class V2XAlert(BaseModel):
     alert_id: str = Field(default_factory=lambda: f"alt-{uuid4().hex}")
-    alert_type: Literal["EMERGENCY_CORRIDOR_ALERT", "SEVERE_BRAKING_CONGESTION_ALERT", "LOCAL_EMERGENCY_CORRIDOR_ALERT", "LOCAL_COLLISION_RISK_ALERT", "LOCAL_ROAD_HAZARD_ALERT"]
+    alert_type: Literal[
+        "EMERGENCY_CORRIDOR_ALERT",
+        "SEVERE_BRAKING_CONGESTION_ALERT",
+        "ROAD_HAZARD_ALERT",
+        "LOCAL_EMERGENCY_CORRIDOR_ALERT",
+        "LOCAL_COLLISION_RISK_ALERT",
+        "LOCAL_ROAD_HAZARD_ALERT",
+    ]
     severity: Literal["WARNING", "CRITICAL"]
     location: str
     triggered_by_event_id: str

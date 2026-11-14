@@ -4,6 +4,11 @@
 We are implementing Deliverable 1 (MVP) for the Distributed Systems course at Universidade de Vigo.
 All code, comments, logs, and Dashboard UI text MUST be in **English**.
 
+## Repository Hygiene
+- Do not use emojis in terminal output, summaries, or Markdown files, except `✅` and `❌`.
+- Keep development summaries, checklists, and implementation manifests in the local `dev_notes/` directory.
+- Keep `dev_notes/` in `.gitignore` so development notes remain local and do not enter Git.
+
 ### Architecture & Data Flow for Deliverable 1 (MVP)
 1. **Simulator (`simulator/obu_simulator.py`)**:
    - Simulates at least 5 distinct vehicles (`veh-001` to `veh-005`) assigned across 2 logical road segments (`sector-A12-tunnel` and `sector-B04-bridge`).

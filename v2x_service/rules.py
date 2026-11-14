@@ -6,6 +6,18 @@ def evaluate_event_for_alert(
     previous_vehicle_state: Optional[V2XEvent] = None,
 ) -> Optional[V2XAlert]:
     """Evaluates an incoming V2XEvent and returns a V2XAlert if safety conditions are met."""
+
+    if event.event_type == "road_hazard":
+        return V2XAlert(
+            alert_type="ROAD_HAZARD_ALERT",
+            severity="WARNING",
+            location=event.location,
+            triggered_by_event_id=event.event_id,
+            source_id=event.source_id,
+            message=f"Road hazard reported in {event.location}; reduce speed and proceed with caution.",
+            action_instruction="REDUCE SPEED and proceed with caution through this sector.",
+            origin="cloud",
+        )
     
     # 1. Emergency Corridor Priority Rule
     entered_active_segment = (

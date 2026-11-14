@@ -1,21 +1,29 @@
 import logging
 import threading
-from typing import Any
+from typing import Any, Callable, Optional
 
 import boto3
 from pydantic import ValidationError
 
 from v2x_service.storage import Storage
-from common.schemas import V2XEvent
+from common.schemas import V2XAlert, V2XEvent
 
 logger = logging.getLogger(__name__)
 
 
 class SQSWorker:
-    def __init__(self, storage: Storage, queue_url: str, region: str, client: Any = None) -> None:
+    def __init__(
+        self,
+        storage: Storage,
+        queue_url: str,
+        region: str,
+        client: Any = None,
+        on_alert: Optional[Callable[[V2XAlert], None]] = None,
+    ) -> None:
         self.storage = storage
         self.queue_url = queue_url
         self.client = client if client is not None else boto3.client("sqs", region_name=region)
+        self.on_alert = on_alert
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name="sqs-worker", daemon=True)
 
@@ -35,7 +43,9 @@ class SQSWorker:
             logger.exception("Discarding invalid SQS message %s", message.get("MessageId"))
             self.client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=message["ReceiptHandle"])
             return
-        self.storage.process_event(event)
+        processed, alert = self.storage.process_event(event)
+        if processed and alert and self.on_alert:
+            self.on_alert(alert)
         self.client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=message["ReceiptHandle"])
 
     def run(self) -> None:
