@@ -1,3 +1,5 @@
+"""Idempotent event storage, timestamp-ordered state, and experiment metrics."""
+
 import json
 import threading
 from datetime import datetime, timezone
@@ -21,10 +23,19 @@ BASELINE_VEHICLES = {
 
 
 def event_time(event: V2XEvent) -> datetime:
+    """Parse an event's validated ISO 8601 timestamp for ordering comparisons."""
     return datetime.fromisoformat(event.event_time.replace("Z", "+00:00"))
 
 
 def latest_states(events: List[V2XEvent]) -> Dict[str, V2XEvent]:
+    """Select each vehicle's newest event by event timestamp, not arrival order.
+
+    Args:
+        events: Events already accepted by the storage backend.
+
+    Returns:
+        A mapping from source identifier to its latest event.
+    """
     states: Dict[str, V2XEvent] = {}
     for event in events:
         previous = states.get(event.source_id)
@@ -34,6 +45,7 @@ def latest_states(events: List[V2XEvent]) -> Dict[str, V2XEvent]:
 
 
 def baseline_sector_vehicles() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Create dashboard baseline vehicle records for both configured sectors."""
     sector_vehicles: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for sector in SECTORS:
         sector_vehicles[sector] = {}
@@ -63,6 +75,7 @@ def baseline_sector_vehicles() -> Dict[str, Dict[str, Dict[str, Any]]]:
 
 
 def _percentile(samples: List[float], percentile: float) -> float:
+    """Interpolate a percentile from numeric samples, returning zero when empty."""
     if not samples:
         return 0.0
     ordered = sorted(samples)
@@ -74,11 +87,15 @@ def _percentile(samples: List[float], percentile: float) -> float:
 
 
 class ExperimentMetrics:
+    """Collect thread-safe latency, sequence, aggregation, and SNS counters."""
+
     def __init__(self) -> None:
+        """Create empty experiment metrics and initialize their synchronization lock."""
         self._lock = threading.Lock()
         self.reset()
 
     def record_event(self, event: V2XEvent) -> None:
+        """Record event latency, sequence gaps, reordering, and density output."""
         now = datetime.now(timezone.utc)
         latency = max(0.0, (now - event_time(event).astimezone(timezone.utc)).total_seconds() * 1000)
         with self._lock:
@@ -108,10 +125,12 @@ class ExperimentMetrics:
                 }
 
     def record_sns_alert(self) -> None:
+        """Increment the count of alerts successfully published to SNS."""
         with self._lock:
             self.sns_alerts_published += 1
 
     def summary(self) -> Dict[str, Any]:
+        """Return a consistent snapshot of accumulated experiment metrics."""
         with self._lock:
             latencies = list(self.latencies)
             return {
@@ -126,6 +145,7 @@ class ExperimentMetrics:
             }
 
     def reset(self) -> None:
+        """Clear event and alert measurements for a fresh experiment run."""
         with self._lock:
             self.latencies: List[float] = []
             self.sequence_by_source: Dict[str, int] = {}
@@ -141,6 +161,16 @@ def build_summary(
     duplicates: int,
     experiment_metrics: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Build the dashboard state from stored event/alert records and metrics.
+
+    Args:
+        records: Persisted event records and any associated cloud alerts.
+        duplicates: Number of duplicate event IDs ignored by the backend.
+        experiment_metrics: Optional live metric snapshot to include in the result.
+
+    Returns:
+        A JSON-compatible summary with latest vehicle states, alerts, and events.
+    """
     events = [V2XEvent.model_validate(record["event"]) for record in records]
     states = latest_states(events)
     sector_states: Dict[str, Dict[str, V2XEvent]] = {}
@@ -191,6 +221,7 @@ def build_summary(
 
 
 def make_record(event: V2XEvent, events: List[V2XEvent]) -> Dict[str, Any]:
+    """Create a stored event/alert record using prior timestamp-ordered state."""
     previous_states = latest_states(events)
     previous = previous_states.get(event.source_id)
     states = latest_states(events + [event])
@@ -203,20 +234,45 @@ def make_record(event: V2XEvent, events: List[V2XEvent]) -> Dict[str, Any]:
 
 
 class Storage(Protocol):
-    def process_event(self, event: V2XEvent) -> Tuple[bool, Optional[V2XAlert]]: ...
-    def summary(self) -> Dict[str, Any]: ...
-    def record_sns_alert(self) -> None: ...
-    def reset(self) -> None: ...
+    """Define the idempotent storage interface shared by memory and DynamoDB."""
+
+    def process_event(self, event: V2XEvent) -> Tuple[bool, Optional[V2XAlert]]:
+        """Store a unique event and return whether it was new and its alert."""
+        ...
+
+    def summary(self) -> Dict[str, Any]:
+        """Return dashboard state and monitoring metrics."""
+        ...
+
+    def record_sns_alert(self) -> None:
+        """Record a successful cloud alert publication."""
+        ...
+
+    def reset(self) -> None:
+        """Clear stored state and metrics."""
+        ...
 
 
 class InMemoryStorage:
+    """Thread-safe in-process event store for local runs and controlled experiments."""
+
     def __init__(self) -> None:
+        """Initialize records, duplicate tracking, and experiment metrics."""
         self._records: Dict[str, Dict[str, Any]] = {}
         self._duplicates = 0
         self._lock = threading.Lock()
         self._metrics = ExperimentMetrics()
 
     def process_event(self, event: V2XEvent) -> Tuple[bool, Optional[V2XAlert]]:
+        """Persist a unique event once and return any rule-generated alert.
+
+        Args:
+            event: Validated event from direct HTTP ingestion or the SQS worker.
+
+        Returns:
+            ``(False, None)`` for a duplicate ID; otherwise ``(True, alert)`` where
+            alert is ``None`` if no cloud rule matched.
+        """
         with self._lock:
             if event.event_id in self._records:
                 self._duplicates += 1
@@ -228,15 +284,18 @@ class InMemoryStorage:
             return True, V2XAlert.model_validate(record["alert"]) if record["alert"] else None
 
     def summary(self) -> Dict[str, Any]:
+        """Return a dashboard summary with the current in-memory metrics."""
         with self._lock:
             return build_summary(
                 list(self._records.values()), self._duplicates, self._metrics.summary()
             )
 
     def record_sns_alert(self) -> None:
+        """Record a successfully published alert in the experiment metrics."""
         self._metrics.record_sns_alert()
 
     def reset(self) -> None:
+        """Remove all event records and reset duplicate and experiment counters."""
         with self._lock:
             self._records.clear()
             self._duplicates = 0
@@ -244,11 +303,21 @@ class InMemoryStorage:
 
 
 class DynamoDBStorage:
+    """Persist idempotent event records in DynamoDB with conditional insertion."""
+
     def __init__(self, table_name: str, region: str = "us-east-1", table: Any = None) -> None:
+        """Bind to an existing DynamoDB table or create a regional table resource.
+
+        Args:
+            table_name: Table holding event records and duplicate metrics.
+            region: AWS region used when creating the DynamoDB resource.
+            table: Optional compatible table object for tests or injection.
+        """
         self.table = table if table is not None else boto3.resource("dynamodb", region_name=region).Table(table_name)
         self._metrics = ExperimentMetrics()
 
     def _records(self) -> List[Dict[str, Any]]:
+        """Scan all stored event records with consistent reads and pagination."""
         records: List[Dict[str, Any]] = []
         params: Dict[str, Any] = {"ConsistentRead": True}
         while True:
@@ -263,6 +332,7 @@ class DynamoDBStorage:
             params["ExclusiveStartKey"] = key
 
     def _count_duplicate(self) -> None:
+        """Atomically increment the reserved DynamoDB duplicate counter."""
         self.table.update_item(
             Key={"event_id": METRICS_KEY},
             UpdateExpression="ADD duplicates_ignored :one",
@@ -270,6 +340,12 @@ class DynamoDBStorage:
         )
 
     def process_event(self, event: V2XEvent) -> Tuple[bool, Optional[V2XAlert]]:
+        """Conditionally persist a unique event and compute its cloud alert.
+
+        A conditional write makes event-ID idempotency safe across concurrent
+        consumers; timestamp-based state selection keeps late arrivals from
+        replacing newer vehicle state.
+        """
         if self.table.get_item(Key={"event_id": event.event_id}, ConsistentRead=True).get("Item"):
             self._count_duplicate()
             return False, None
@@ -289,6 +365,7 @@ class DynamoDBStorage:
         return True, V2XAlert.model_validate(record["alert"]) if record["alert"] else None
 
     def summary(self) -> Dict[str, Any]:
+        """Return a timestamp-ordered dashboard summary from the DynamoDB table."""
         records = self._records()
         metrics = self.table.get_item(Key={"event_id": METRICS_KEY}, ConsistentRead=True).get("Item", {})
         summary = build_summary(
@@ -297,9 +374,11 @@ class DynamoDBStorage:
         return json.loads(json.dumps(summary, default=lambda value: float(value) if isinstance(value, Decimal) else value))
 
     def record_sns_alert(self) -> None:
+        """Record a successful SNS publication in process-local experiment metrics."""
         self._metrics.record_sns_alert()
 
     def reset(self) -> None:
+        """Delete every table item, including the duplicate counter, and reset metrics."""
         params: Dict[str, Any] = {"ProjectionExpression": "event_id", "ConsistentRead": True}
         while True:
             response = self.table.scan(**params)

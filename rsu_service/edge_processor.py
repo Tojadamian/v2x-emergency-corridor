@@ -1,3 +1,5 @@
+"""RSU edge processing for local safety alerts and resilient cloud forwarding."""
+
 import json
 import sqlite3
 import time
@@ -9,7 +11,12 @@ from common.schemas import V2XEvent, V2XAlert
 
 
 class EdgeProcessor:
-    """RSU edge processing for local validation, aggregation, buffering, and alert generation."""
+    """Implement the RSU fast edge loop, telemetry aggregation, and outage recovery.
+
+    Incoming validated events are deduplicated and sequence-tracked; safety events
+    can produce local alerts immediately, while routine telemetry is summarized
+    and cloud-bound events are buffered in FIFO order during a disconnection.
+    """
 
     def __init__(
         self,
@@ -18,6 +25,14 @@ class EdgeProcessor:
         aggregation_window_size: int = 5,
         buffer_max_size: int = 1000,
     ):
+        """Initialize per-RSU counters and bounded event, telemetry, and alert state.
+
+        Args:
+            rsu_id: Identifier attached to local summaries and alerts.
+            assigned_sector: Road segment represented by this RSU.
+            aggregation_window_size: Number of telemetry samples per summary.
+            buffer_max_size: Maximum number of forwarded events retained offline.
+        """
         self.rsu_id = rsu_id
         self.assigned_sector = assigned_sector
         self.aggregation_window_size = aggregation_window_size
@@ -45,14 +60,14 @@ class EdgeProcessor:
         self.recent_relayed_alerts: List[Dict[str, Any]] = []
 
     def process_event(self, event: V2XEvent) -> Tuple[Optional[V2XEvent], Optional[V2XAlert]]:
-        """
-        Process incoming event:
-        - Validate and check for duplicates
-        - Track sequence numbers
-        - Generate local alerts if critical
-        - Filter/aggregate telemetry or forward critical events
-        
-        Returns (forwarded_event, local_alert) or (None, None) if duplicate/ignored
+        """Process one event through deduplication, edge rules, and forwarding policy.
+
+        Args:
+            event: Validated vehicle or RSU event received at this edge.
+
+        Returns:
+            A pair of the event selected for cloud forwarding and any immediate
+            local alert. Either value may be ``None`` when no item is emitted.
         """
         self.received_events += 1
 
@@ -88,7 +103,7 @@ class EdgeProcessor:
         return event_to_forward, local_alert
 
     def _track_sequence(self, event: V2XEvent) -> None:
-        """Track sequence numbers for out-of-order and lost packet detection."""
+        """Update per-vehicle sequence state and estimate gaps or timestamp reordering."""
         if event.seq_num is None:
             return
 
@@ -117,7 +132,14 @@ class EdgeProcessor:
         self.vehicle_seq_tracking[vehicle_id] = (event.seq_num, event_time_str)
 
     def _check_local_alert(self, event: V2XEvent) -> Optional[V2XAlert]:
-        """Check if event triggers a local alert."""
+        """Evaluate emergency, severe-braking, and hazard rules in the fast edge loop.
+
+        Args:
+            event: Event to evaluate without waiting for cloud processing.
+
+        Returns:
+            A local alert for a matched safety condition, otherwise ``None``.
+        """
         alert = None
 
         if event.event_type == "emergency_vehicle" and event.payload.get("siren_active"):
@@ -170,7 +192,11 @@ class EdgeProcessor:
         return alert
 
     def _aggregate_telemetry(self) -> V2XEvent:
-        """Aggregate buffered telemetry events into a traffic_density event."""
+        """Convert the current count-window of telemetry into one density summary.
+
+        The summary reports sample and vehicle counts, available average speed, and
+        per-vehicle details; the consumed telemetry buffer is cleared.
+        """
         if not self.telemetry_buffer:
             return None
 
@@ -205,7 +231,14 @@ class EdgeProcessor:
         return aggregated_event
 
     def buffer_event(self, event: V2XEvent) -> bool:
-        """Buffer event for offline storage. Returns False if buffer full."""
+        """Append a cloud-bound event to the bounded FIFO outage buffer.
+
+        Args:
+            event: Event to retain until cloud connectivity is restored.
+
+        Returns:
+            ``True`` if the event was queued, or ``False`` if capacity was reached.
+        """
         if self.buffered_count >= self.buffer_max_size:
             self.rejected_events += 1
             return False
@@ -214,7 +247,11 @@ class EdgeProcessor:
         return True
 
     def flush_buffer(self) -> List[V2XEvent]:
-        """Flush all buffered events and return them in order."""
+        """Drain all buffered events in arrival order and record recovery metrics.
+
+        Returns:
+            The FIFO batch to retry against the cloud event path.
+        """
         start_time = time.perf_counter()
         events = list(self.buffered_events)
         self.buffered_events.clear()
@@ -224,14 +261,22 @@ class EdgeProcessor:
         return events
 
     def relay_cloud_alert(self, alert: V2XAlert) -> None:
-        """Record a relayed cloud alert."""
+        """Record a cloud alert relayed through this RSU for edge subscribers.
+
+        Args:
+            alert: Validated alert received from the cloud alert path.
+        """
         self.relayed_cloud_alerts_count += 1
         self.recent_relayed_alerts.append(alert.model_dump(mode="json"))
         if len(self.recent_relayed_alerts) > 50:
             self.recent_relayed_alerts.pop(0)
 
     def get_status(self) -> Dict[str, Any]:
-        """Return complete RSU status."""
+        """Return RSU identity, edge counters, connectivity, and recent alerts.
+
+        Returns:
+            A JSON-compatible snapshot used by the cloud dashboard and experiments.
+        """
         return {
             "rsu_id": self.rsu_id,
             "sector": self.assigned_sector,

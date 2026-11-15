@@ -1,4 +1,9 @@
-"""Run isolated, controlled edge/cloud experiments without AWS resources."""
+"""Run isolated, controlled experiments across the V2X edge and cloud paths.
+
+The four experiment families measure delivery anomalies, edge-cloud disconnection,
+component failure/retries, and increasing load. Each runner uses fresh in-process
+components with fixed random seeds and writes Markdown and JSON result reports.
+"""
 
 import argparse
 import json
@@ -24,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _edges(buffer_max_size: int = 1000) -> dict[str, EdgeProcessor]:
+    """Create isolated processors for the tunnel and bridge RSU groups."""
     return {
         "rsu-1": EdgeProcessor("rsu-1", "sector-A12-tunnel", buffer_max_size=buffer_max_size),
         "rsu-2": EdgeProcessor("rsu-2", "sector-B04-bridge", buffer_max_size=buffer_max_size),
@@ -34,6 +40,7 @@ class Cloud:
     """Use the service's real ingestion endpoint with isolated memory storage."""
 
     def __init__(self) -> None:
+        """Create an isolated cloud app and retain its direct ingest endpoint."""
         from v2x_service.main import create_app
 
         self.storage = InMemoryStorage()
@@ -42,12 +49,14 @@ class Cloud:
         self.delivered: list[V2XEvent] = []
 
     def send(self, event: V2XEvent) -> bool:
+        """Ingest an event and track it only when cloud storage accepts it."""
         processed = self.ingest(event)["processed"]
         if processed:
             self.delivered.append(event)
         return processed
 
     def consistent_with(self, expected: list[V2XEvent]) -> bool:
+        """Compare stored latest source states with the expected event set."""
         latest: dict[str, V2XEvent] = {}
         for event in expected:
             if event.source_id not in latest or event.event_time > latest[event.source_id].event_time:
@@ -59,6 +68,7 @@ class Cloud:
 
 
 def _vehicle(index: int) -> tuple[str, str, str, str]:
+    """Return a configured vehicle or a generated vehicle assigned to an RSU."""
     if index < len(VEHICLES):
         return VEHICLES[index]
     rsu_id, sector = (
@@ -72,6 +82,7 @@ def _event(
     index: int, vehicle_index: int, sequences: dict[str, int], rng: random.Random,
     base_time: datetime, critical: bool = False,
 ) -> V2XEvent:
+    """Generate an indexed experiment event with deterministic ID and timestamp."""
     event = generate_event(_vehicle(vehicle_index), sequences, rng)
     event.event_id = f"experiment-{index:04d}"
     event.event_time = (base_time + timedelta(microseconds=index)).isoformat()
@@ -82,6 +93,7 @@ def _event(
 
 
 def _latencies(samples: list[float]) -> dict[str, float]:
+    """Return rounded median and 95th-percentile latency metrics."""
     return {
         "p50_latency_ms": round(_percentile(samples, 0.5), 3),
         "p95_latency_ms": round(_percentile(samples, 0.95), 3),
@@ -89,6 +101,12 @@ def _latencies(samples: list[float]) -> dict[str, float]:
 
 
 def run_delivery_anomalies_experiment() -> list[dict[str, Any]]:
+    """Measure edge/cloud delivery under baseline, delay, loss, duplication, and reordering.
+
+    Returns:
+        Rows containing acceptance, forwarding, sequence, latency, and final-state
+        consistency metrics for each controlled condition.
+    """
     conditions = [
         ("baseline", "baseline", {}),
         ("delay", "level_1", {"delay_ms": 50}),
@@ -112,6 +130,7 @@ def run_delivery_anomalies_experiment() -> list[dict[str, Any]]:
         base_time = datetime.now(timezone.utc) - timedelta(seconds=1)
 
         def receive(event: V2XEvent) -> None:
+            """Run an injected event through its RSU and record cloud latency."""
             forwarded, _ = edges[event.rsu_id].process_event(event)
             if forwarded is not None:
                 if cloud.send(forwarded):
@@ -142,6 +161,12 @@ def run_delivery_anomalies_experiment() -> list[dict[str, Any]]:
 
 
 def run_edge_cloud_disconnection_experiment() -> list[dict[str, Any]]:
+    """Measure local alerting, bounded buffering, rejection, and FIFO recovery.
+
+    Returns:
+        Rows for large and constrained buffers, including data loss and recovery
+        metrics after the simulated cloud connection is restored.
+    """
     results = []
     for scenario, capacity in (("A", 1000), ("B", 15)):
         edge, cloud = _edges(capacity)["rsu-1"], Cloud()
@@ -185,14 +210,24 @@ def run_edge_cloud_disconnection_experiment() -> list[dict[str, Any]]:
 
 
 class _QueueClient:
+    """Minimal SQS-compatible deletion recorder for worker retry experiments."""
+
     def __init__(self) -> None:
+        """Initialize the list of acknowledged queue receipt handles."""
         self.deleted: list[str] = []
 
     def delete_message(self, QueueUrl: str, ReceiptHandle: str) -> None:
+        """Record a worker acknowledgement without contacting AWS."""
         self.deleted.append(ReceiptHandle)
 
 
 def run_component_failure_experiment() -> list[dict[str, Any]]:
+    """Measure SQS-worker recovery and idempotency after duplicate retry deliveries.
+
+    Returns:
+        Rows with queue depth, injected retries, ignored duplicates, processed
+        events, recovery time, and final-state consistency.
+    """
     results = []
     for level, count, retries in (("level_1", 25, 5), ("level_2", 75, 15)):
         cloud = Cloud()
@@ -229,11 +264,17 @@ def run_component_failure_experiment() -> list[dict[str, Any]]:
 
 
 def _peak_memory_kb() -> float:
+    """Return process peak resident memory in kilobytes for the current platform."""
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return value / 1024 if sys.platform == "darwin" else float(value)
 
 
 def run_load_increase_experiment() -> list[dict[str, Any]]:
+    """Measure throughput, latency, filtering, queue depth, errors, and memory by load.
+
+    Returns:
+        One metric row for each configured vehicle, burst, and event volume level.
+    """
     results = []
     for level, vehicles, burst, total in (
         ("level_1", 5, 1, 100),
@@ -283,6 +324,11 @@ def run_load_increase_experiment() -> list[dict[str, Any]]:
 
 
 def run_all_experiments() -> dict[str, Any]:
+    """Run all four controlled experiment families in isolated in-process state.
+
+    Returns:
+        A mapping with delivery, disconnection, component-failure, and load rows.
+    """
     return {
         "delivery_anomalies": run_delivery_anomalies_experiment(),
         "edge_cloud_disconnection": run_edge_cloud_disconnection_experiment(),
@@ -292,8 +338,11 @@ def run_all_experiments() -> dict[str, Any]:
 
 
 def _table(rows: list[dict[str, Any]]) -> str:
+    """Render experiment result rows as a Markdown table with escaped cells."""
     columns = list(rows[0])
+
     def cell(value: Any) -> str:
+        """Serialize structured values and escape Markdown table delimiters."""
         if isinstance(value, (dict, list)):
             return json.dumps(value, sort_keys=True).replace("|", "\\|")
         return str(value).replace("|", "\\|")
@@ -305,6 +354,15 @@ def _table(rows: list[dict[str, Any]]) -> str:
 
 
 def render_report(results: dict[str, Any], source: str) -> str:
+    """Render experiment methodology, metric tables, and bounded conclusions.
+
+    Args:
+        results: Output of the four experiment runners.
+        source: Description of the local or remote execution target.
+
+    Returns:
+        Complete Markdown report text ending with a newline.
+    """
     sections = [
         ("Experiment 1: Delivery Anomalies", "delivery_anomalies"),
         ("Experiment 2: Edge-Cloud Disconnection", "edge_cloud_disconnection"),
@@ -368,6 +426,11 @@ def render_report(results: dict[str, Any], source: str) -> str:
 
 
 def main() -> None:
+    """Run locally or request a deployment run, then write JSON and Markdown reports.
+
+    The durable report path is the repository's ``EXPERIMENT_RESULTS.md``;
+    generated JSON is kept under the ignored ``dev_notes`` directory.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live-url", help="Base URL of a deployment with the experiment API")
     args = parser.parse_args()

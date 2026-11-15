@@ -1,3 +1,5 @@
+"""Long-poll the cloud SQS event queue and process messages idempotently."""
+
 import logging
 import threading
 from typing import Any, Callable, Optional
@@ -12,6 +14,12 @@ logger = logging.getLogger(__name__)
 
 
 class SQSWorker:
+    """Consume SQS event messages and pass them to storage and alert fan-out.
+
+    The worker acknowledges invalid messages and successfully processed messages;
+    processing failures are logged and left undeleted so the queue can retry them.
+    """
+
     def __init__(
         self,
         storage: Storage,
@@ -20,6 +28,15 @@ class SQSWorker:
         client: Any = None,
         on_alert: Optional[Callable[[V2XAlert], None]] = None,
     ) -> None:
+        """Configure the queue consumer, storage backend, and optional alert callback.
+
+        Args:
+            storage: Idempotent event store used by direct and queued ingestion.
+            queue_url: SQS queue polled by this worker.
+            region: AWS region for a client created by the worker.
+            client: Optional SQS-compatible client, primarily for isolated tests.
+            on_alert: Callback invoked for newly processed events that raise alerts.
+        """
         self.storage = storage
         self.queue_url = queue_url
         self.client = client if client is not None else boto3.client("sqs", region_name=region)
@@ -28,15 +45,22 @@ class SQSWorker:
         self.thread = threading.Thread(target=self.run, name="sqs-worker", daemon=True)
 
     def start(self) -> None:
+        """Start the background long-polling thread."""
         self.thread.start()
 
     def stop(self) -> None:
+        """Request shutdown and wait for the worker thread to finish."""
         self.stop_event.set()
         self.thread.join(timeout=20)
         if self.thread.is_alive():
             logger.warning("SQS worker did not stop within 20 seconds")
 
     def process_message(self, message: Any) -> None:
+        """Validate, persist, fan out, and acknowledge one received SQS message.
+
+        Invalid event messages are logged and acknowledged; storage or callback
+        failures propagate to the polling loop, which leaves the message for retry.
+        """
         try:
             event = V2XEvent.model_validate_json(message["Body"])
         except ValidationError:
@@ -49,6 +73,7 @@ class SQSWorker:
         self.client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=message["ReceiptHandle"])
 
     def run(self) -> None:
+        """Long-poll SQS until shutdown, retrying failed receives and message work."""
         while not self.stop_event.is_set():
             try:
                 response = self.client.receive_message(

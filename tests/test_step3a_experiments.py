@@ -1,3 +1,4 @@
+import ast
 import json
 import subprocess
 from pathlib import Path
@@ -236,3 +237,111 @@ def test_deliverable_documentation_exists_and_covers_architecture_and_schemas():
         encoding="utf-8"
     )
     assert "## 1. System Architecture & Data Flow" in mvp_documentation
+
+
+def test_python_modules_have_docstrings_and_deliverable2_criteria():
+    source_directories = (
+        "common",
+        "rsu_service",
+        "v2x_service",
+        "simulator",
+        "experiments",
+    )
+    module_paths = sorted(
+        path
+        for directory in source_directories
+        for path in (ROOT / directory).rglob("*.py")
+        if path.name != "__init__.py"
+    )
+    for path in module_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        assert ast.get_docstring(tree), f"{path.relative_to(ROOT)} has no module docstring"
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                assert ast.get_docstring(node), (
+                    f"{path.relative_to(ROOT)} class {node.name} has no docstring"
+                )
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if not node.name.startswith("_"):
+                    assert ast.get_docstring(node), (
+                        f"{path.relative_to(ROOT)} function {node.name} has no docstring"
+                    )
+
+    simulator_path = ROOT / "simulator/obu_simulator.py"
+    simulator_tree = ast.parse(simulator_path.read_text(encoding="utf-8"))
+    vehicles_node = next(
+        node
+        for node in simulator_tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "VEHICLES"
+            for target in node.targets
+        )
+    )
+    vehicles = ast.literal_eval(vehicles_node.value)
+    vehicle_ids = {vehicle[0] for vehicle in vehicles}
+    assigned_rsus = {vehicle[3] for vehicle in vehicles}
+    assert len(vehicle_ids) >= 5
+    assert assigned_rsus == {"rsu-1", "rsu-2"}
+
+    experiment_specs = {
+        "delivery_anomalies": (
+            "## Experiment 1: Delivery Anomalies",
+            "run_delivery_anomalies_experiment",
+            {
+                "condition", "level", "controls", "generated_events", "accepted_by_rsu",
+                "forwarded_to_cloud", "processed_by_cloud", "estimated_lost_events",
+                "duplicates_ignored", "reordered_events", "p50_latency_ms",
+                "p95_latency_ms", "final_state_consistent",
+            },
+        ),
+        "edge_cloud_disconnection": (
+            "## Experiment 2: Edge-Cloud Disconnection",
+            "run_edge_cloud_disconnection_experiment",
+            {
+                "scenario", "buffer_max_size", "events_sent_during_outage",
+                "local_alerts_during_outage", "local_alert_types", "buffered_events",
+                "rejected_events", "flushed_events", "data_loss_count", "order_preserved",
+                "recovery_time_ms", "final_cloud_processed",
+            },
+        ),
+        "component_failure": (
+            "## Experiment 3: Component Failure",
+            "run_component_failure_experiment",
+            {
+                "level", "queue_peak_depth", "unprocessed_during_outage",
+                "retry_deliveries_injected", "duplicates_ignored",
+                "processed_unique_events", "recovery_time_ms", "final_state_consistent",
+            },
+        ),
+        "load_increase": (
+            "## Experiment 4: Load Increase",
+            "run_load_increase_experiment",
+            {
+                "level", "vehicles", "burst_size", "total_events",
+                "rsu_filtered_telemetry", "bandwidth_saved_pct", "cloud_processed_events",
+                "throughput_events_per_sec", "p50_latency_ms", "p95_latency_ms",
+                "max_queue_depth", "error_rate_pct", "memory_delta_kb",
+            },
+        ),
+    }
+    report = (ROOT / "EXPERIMENT_RESULTS.md").read_text(encoding="utf-8")
+    experiment_source = (ROOT / "experiments/run_experiments.py").read_text(encoding="utf-8")
+    for family, (heading, runner, required_metrics) in experiment_specs.items():
+        assert heading in report, f"Missing {family} report section"
+        assert f"def {runner}(" in experiment_source, f"Missing {family} runner"
+
+        report_lines = report.splitlines()
+        heading_index = report_lines.index(heading)
+        header_line = next(
+            line for line in report_lines[heading_index + 1:] if line.startswith("| ")
+        )
+        report_metrics = {
+            column.strip() for column in header_line.strip().strip("|").split("|")
+        }
+        assert required_metrics <= report_metrics, (
+            f"{family} report is missing metrics: {required_metrics - report_metrics}"
+        )
+        assert all(f'"{metric}"' in experiment_source for metric in required_metrics), (
+            f"{family} runner source is missing required metric keys"
+        )

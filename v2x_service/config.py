@@ -1,3 +1,5 @@
+"""Environment-backed settings for cloud storage, messaging, and RSU connectivity."""
+
 import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -5,6 +7,12 @@ from urllib.parse import urlparse
 
 @dataclass(frozen=True)
 class Settings:
+    """Immutable runtime configuration for the cloud service and its integrations.
+
+    Defaults support isolated local development; environment values select AWS
+    storage and SQS processing or configure dashboard access to both RSUs.
+    """
+
     aws_region: str = "us-east-1"
     sqs_queue_url: str = ""
     dynamodb_table: str = "v2x-events-store"
@@ -16,6 +24,15 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        """Load and validate settings from process environment variables.
+
+        Returns:
+            A settings instance with normalized URLs and validated backend options.
+
+        Raises:
+            ValueError: If a backend, worker flag, static URL, or required queue
+                configuration is invalid.
+        """
         backend = os.getenv("STORAGE_BACKEND", "memory").lower()
         if backend not in ("memory", "dynamodb"):
             raise ValueError("STORAGE_BACKEND must be memory or dynamodb")

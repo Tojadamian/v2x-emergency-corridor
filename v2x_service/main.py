@@ -1,3 +1,10 @@
+"""Cloud FastAPI application for event ingestion, alerts, and Digital Twin state.
+
+The service routes direct events and SQS worker output through idempotent storage,
+publishes cloud alerts over SNS and HTTP, and exposes dashboard and RSU control
+endpoints for the emergency-corridor experiment.
+"""
+
 from contextlib import asynccontextmanager
 from html import escape
 import logging
@@ -36,6 +43,16 @@ def create_app(
     storage: Optional[Storage] = None,
     deliver_alerts: bool = True,
 ) -> FastAPI:
+    """Create the cloud API with injectable settings and isolated storage.
+
+    Args:
+        settings: Runtime configuration; environment settings are loaded if omitted.
+        storage: Event store; the configured memory or DynamoDB backend is used if omitted.
+        deliver_alerts: Whether accepted cloud alerts are sent to SNS and RSUs.
+
+    Returns:
+        A FastAPI application exposing ingestion, Digital Twin, and experiment routes.
+    """
     settings = settings or Settings.from_env()
     if storage is None:
         storage = (
@@ -51,6 +68,11 @@ def create_app(
     sns_client = None
 
     def publish_alert(alert: V2XAlert) -> None:
+        """Fan out a cloud alert to the configured SNS topic and RSU HTTP endpoints.
+
+        Args:
+            alert: Rule-generated alert for a newly processed event.
+        """
         nonlocal sns_client
         if not deliver_alerts:
             return
@@ -82,6 +104,12 @@ def create_app(
                 logger.exception("Failed to relay alert %s to RSU endpoint %s", alert.alert_id, url)
 
     async def fetch_rsu_status(rsu_url: str, timeout: float = 0.4) -> Optional[Dict[str, Any]]:
+        """Fetch RSU counters for the Digital Twin summary, or return ``None``.
+
+        Args:
+            rsu_url: Base URL of one roadside-unit service.
+            timeout: Maximum duration of the status request.
+        """
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(f"{rsu_url}/api/status")
@@ -96,6 +124,7 @@ def create_app(
             return None
 
     def normalize_rsu_status(rsu_id: str, status: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize current and legacy RSU status fields for dashboard consumers."""
         cloud_disconnected = bool(status.get("cloud_disconnected", not status.get("cloud_connected", True)))
         forwarded_events = int(status.get("forwarded_events", status.get("forwarded_to_sqs", 0)))
         local_alerts_count = int(status.get("local_alerts_count", status.get("local_edge_alerts", 0)))
@@ -127,6 +156,14 @@ def create_app(
         }
 
     def inject_synthetic_event(event: V2XEvent) -> bool:
+        """Apply a demo event to cloud storage and publish any newly raised alert.
+
+        Args:
+            event: Synthetic event for a Digital Twin demonstration scenario.
+
+        Returns:
+            Whether the event was newly accepted by idempotent storage.
+        """
         processed, alert = storage.process_event(event)
         if processed and alert:
             publish_alert(alert)
@@ -134,6 +171,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """Start and stop the optional SQS worker with the cloud application."""
         worker = None
         if settings.enable_sqs_worker:
             worker = SQSWorker(
@@ -154,10 +192,12 @@ def create_app(
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():
+        """Return an empty response for browser favicon requests."""
         return Response(status_code=204)
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard():
+        """Serve the dashboard shell with its configured static-asset base URL."""
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         base = escape(settings.s3_static_base_url or "/ui", quote=True)
         return html.replace('href="/ui/styles.css"', f'href="{base}/styles.css"').replace(
@@ -166,6 +206,7 @@ def create_app(
 
     @app.get("/api/summary")
     async def summary():
+        """Return Digital Twin state, metrics, and live-or-fallback RSU status."""
         result = storage.summary()
         
         # Fetch RSU status with timeout fallback
@@ -186,19 +227,30 @@ def create_app(
 
     @app.get("/api/state")
     def state():
+        """Return current vehicle states and active emergency corridors."""
         result = storage.summary()
         return {"vehicles": result["vehicles"], "active_emergency_corridors": result["active_emergency_corridors"]}
 
     @app.get("/api/events")
     def events():
+        """Return the most recent cloud-stored events for the dashboard."""
         return storage.summary()["recent_events"]
 
     @app.get("/api/alerts")
     def alerts():
+        """Return the most recent cloud-generated safety alerts."""
         return storage.summary()["recent_alerts"]
 
     @app.post("/api/events/ingest")
     def ingest(event: V2XEvent):
+        """Ingest one validated cloud event idempotently and publish its alert.
+
+        Args:
+            event: Event received directly from a producer or compatible client.
+
+        Returns:
+            Whether storage accepted the event and any resulting cloud alert.
+        """
         processed, alert = storage.process_event(event)
         if processed and alert:
             publish_alert(alert)
@@ -206,12 +258,14 @@ def create_app(
 
     @app.post("/api/experiments/run")
     def run_experiments():
+        """Run the four isolated controlled experiment families and return results."""
         from experiments.run_experiments import run_all_experiments
 
         return {"status": "ok", "results": run_all_experiments()}
 
     @app.post("/api/control/reset")
     async def reset():
+        """Clear cloud state and ask both RSUs to reset their experiment counters."""
         storage.reset()
         # Attempt to reset RSUs
         for rsu_url in [settings.rsu_1_url, settings.rsu_2_url]:
@@ -224,6 +278,14 @@ def create_app(
 
     @app.post("/api/control/rsu-disconnection")
     async def rsu_disconnection(payload: Dict[str, Any]):
+        """Toggle one RSU's cloud connection, forwarding to it or using demo state.
+
+        Args:
+            payload: Object containing the target ``rsu_id`` and ``disconnected`` flag.
+
+        Returns:
+            A forwarding or local-fallback status, or an error for an unknown RSU.
+        """
         rsu_id = payload.get("rsu_id", "").lower()
         disconnected = payload.get("disconnected", False)
         
@@ -249,6 +311,14 @@ def create_app(
 
     @app.post("/api/control/simulate-scenario")
     async def simulate_scenario(payload: Dict[str, Any]):
+        """Inject a named Digital Twin scenario and forward its representative event.
+
+        Args:
+            payload: Scenario name and optional valid road-sector override.
+
+        Returns:
+            Scenario status and number of unique events accepted by cloud storage.
+        """
         scenario = payload.get("scenario", "").lower()
         now = datetime.now(timezone.utc).isoformat()
         requested_sector = payload.get("sector")
@@ -272,6 +342,7 @@ def create_app(
         forwarded_event = None
 
         def lane_for(vehicle_id: str, fallback: int) -> int:
+            """Read a vehicle's current lane from sector state or use a default."""
             return int(sector_vehicles.get(vehicle_id, {}).get("payload", {}).get("lane", fallback))
 
         if scenario == "emergency_corridor":

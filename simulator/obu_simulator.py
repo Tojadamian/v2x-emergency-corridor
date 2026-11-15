@@ -1,3 +1,10 @@
+"""Generate controlled OBU traffic and transmit it over V2X transport modes.
+
+The simulator assigns vehicles to RSUs, attaches per-vehicle sequence numbers,
+and can inject delivery anomalies before sending events by SQS, HTTP, RSU HTTP,
+or MQTT. MQTT uses the configured publish QoS and subscribes to RSU alert topics.
+"""
+
 import argparse
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -36,6 +43,17 @@ def generate_event(
     sequence_numbers: Optional[MutableMapping[str, int]] = None,
     rng=random,
 ) -> V2XEvent:
+    """Generate one typed vehicle event with routing and sequence metadata.
+
+    Args:
+        vehicle: Vehicle tuple containing ID, type, sector, and optional RSU ID.
+        sequence_numbers: Mutable per-vehicle sequence state; global state is used
+            when omitted.
+        rng: Random source used for reproducible event type and payload generation.
+
+    Returns:
+        A validated V2X event for simulator transport or experiment injection.
+    """
     vehicle_id, vehicle_type, location = vehicle[:3]
     rsu_id = vehicle[3] if len(vehicle) > 3 else (
         "rsu-2" if location == "sector-B04-bridge" else "rsu-1"
@@ -80,6 +98,18 @@ def generate_burst(
     rng=random,
     roam_sectors: bool = False,
 ) -> tuple[list[V2XEvent], int]:
+    """Generate a rotating batch of events and return the next vehicle index.
+
+    Args:
+        burst_size: Number of events to generate; must be positive.
+        vehicle_index: Starting index in the configured vehicle list.
+        sequence_numbers: Optional sequence state shared across generated bursts.
+        rng: Random source for deterministic or standard simulation.
+        roam_sectors: Whether even-numbered events alternate to the other RSU.
+
+    Returns:
+        A pair containing generated events and the next starting vehicle index.
+    """
     if burst_size < 1:
         raise ValueError("burst_size must be at least 1")
     events = []
@@ -100,7 +130,11 @@ def generate_burst(
 
 
 class AnomalyInjector:
-    """Applies deterministic controls for delay, loss, duplication, and reordering."""
+    """Apply controlled delivery anomalies before transport to the receiver.
+
+    Delay, loss, duplication, and reordering controls support reproducible
+    delivery-anomaly experiments; ``flush`` releases any held reordered events.
+    """
 
     def __init__(
         self,
@@ -111,6 +145,19 @@ class AnomalyInjector:
         rng=random,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        """Configure anomaly probabilities and the clock/sleep dependencies.
+
+        Args:
+            delay_ms: Simulated event-time delay and requested sleep duration.
+            loss_rate: Probability that an event is dropped.
+            duplicate_rate: Probability that a transmitted event is sent twice.
+            reorder_rate: Probability that an event is held for later reordering.
+            rng: Random source controlling anomaly decisions.
+            sleep: Injectable sleep function for real or virtual delay.
+
+        Raises:
+            ValueError: If delay is negative or a probability is outside [0, 1].
+        """
         if delay_ms < 0:
             raise ValueError("delay_ms must be non-negative")
         for name, value in (
@@ -129,6 +176,7 @@ class AnomalyInjector:
         self.held_events: dict[str, V2XEvent] = {}
 
     def _send(self, event: V2XEvent, sender: Callable[[V2XEvent], None]) -> int:
+        """Send an event once and apply the configured duplicate decision."""
         sender(event)
         count = 1
         if self.rng.random() < self.duplicate_rate:
@@ -137,6 +185,16 @@ class AnomalyInjector:
         return count
 
     def transmit(self, event: V2XEvent, sender: Callable[[V2XEvent], None]) -> int:
+        """Apply loss, delay, duplication, and reordering before invoking a sender.
+
+        Args:
+            event: Event to transmit or hold for a later out-of-order delivery.
+            sender: Transport callback for SQS, HTTP, or MQTT delivery.
+
+        Returns:
+            Number of sender calls made for this event; held or dropped events
+            return zero until or unless they are flushed.
+        """
         if self.rng.random() < self.loss_rate:
             return 0
         if self.delay_ms:
@@ -157,12 +215,14 @@ class AnomalyInjector:
         return self._send(event, sender)
 
     def flush(self, sender: Callable[[V2XEvent], None]) -> int:
+        """Send all events still held for reordering and return send count."""
         held_events = list(self.held_events.values())
         self.held_events.clear()
         return sum(self._send(event, sender) for event in held_events)
 
 
 def _http_post(url: str, event: V2XEvent) -> None:
+    """POST an event's JSON representation to a cloud or RSU HTTP endpoint."""
     request = urllib.request.Request(
         url,
         data=event.model_dump_json().encode("utf-8"),
@@ -174,6 +234,7 @@ def _http_post(url: str, event: V2XEvent) -> None:
 
 
 def _mqtt_alert_callback(client, userdata, message) -> None:
+    """Count and print a decoded alert received on an RSU MQTT topic."""
     global received_alerts
     try:
         alert = json.loads(message.payload.decode("utf-8"))
@@ -193,10 +254,16 @@ def _mqtt_alert_callback(client, userdata, message) -> None:
 
 
 def _mqtt_connect_callback(client, userdata, flags, reason_code, properties, *, qos=1) -> None:
+    """Subscribe the simulator to RSU alert topics at the configured MQTT QoS."""
     client.subscribe("v2x/+/alerts/#", qos=qos)
 
 
 def main() -> None:
+    """Parse simulator options and run the selected transport/anomaly workload.
+
+    The command-line entry point controls event rate, burst generation, optional
+    sector roaming, anomaly probabilities, and SQS/HTTP/RSU-HTTP/MQTT transport.
+    """
     parser = argparse.ArgumentParser(description="Publish simulated V2X vehicle events")
     parser.add_argument("--rate", type=float, default=1.0, help="Events per second")
     parser.add_argument("--mode", choices=("sqs", "http", "mqtt", "rsu-http"), default="sqs")
@@ -250,6 +317,7 @@ def main() -> None:
         mqtt_client.loop_start()
 
     def send_event(event: V2XEvent) -> None:
+        """Send an event through the selected SQS, MQTT, or HTTP transport."""
         body = event.model_dump_json()
         if sqs_client:
             sqs_client.send_message(QueueUrl=queue_url, MessageBody=body)

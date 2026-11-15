@@ -1,3 +1,10 @@
+"""FastAPI and MQTT entry points for the roadside-unit edge service.
+
+The RSU accepts vehicle events over HTTP or its configured MQTT QoS subscriber,
+runs local safety checks before cloud forwarding, queues events during outages,
+and relays cloud alerts to vehicle-facing MQTT alert topics.
+"""
+
 import asyncio
 import json
 import logging
@@ -48,7 +55,12 @@ if sqs_queue_url:
 
 
 def publish_mqtt(topic: str, payload: dict) -> None:
-    """Publish message to MQTT topic."""
+    """Publish an alert payload on an MQTT topic at the configured QoS.
+
+    Args:
+        topic: RSU event or alert topic to publish to.
+        payload: JSON-compatible alert fields.
+    """
     if mqtt_client:
         try:
             result = mqtt_client.publish(topic, json.dumps(payload), qos=MQTT_QOS)
@@ -59,7 +71,15 @@ def publish_mqtt(topic: str, payload: dict) -> None:
 
 
 def send_to_sqs(event: V2XEvent) -> bool:
-    """Send event to SQS queue. Returns False if cloud_disconnected or error."""
+    """Forward an event to the cloud SQS event path when connected.
+
+    Args:
+        event: Validated event selected by the edge processor.
+
+    Returns:
+        ``True`` after SQS accepts the message; ``False`` when disconnected,
+        unconfigured, or when the send operation fails.
+    """
     if processor.cloud_disconnected or not sqs_client or not sqs_queue_url:
         return False
     try:
@@ -74,7 +94,14 @@ def send_to_sqs(event: V2XEvent) -> bool:
 
 
 def ingest_v2x_event(event: V2XEvent) -> dict:
-    """Run the common HTTP and MQTT event ingestion path."""
+    """Run the shared edge loop for an event received by HTTP or MQTT.
+
+    Args:
+        event: Validated event received from an OBU.
+
+    Returns:
+        Processing status and a JSON-compatible local alert, if generated.
+    """
     forwarded_event, local_alert = processor.process_event(event)
 
     if local_alert:
@@ -93,7 +120,14 @@ def ingest_v2x_event(event: V2XEvent) -> dict:
 
 
 def handle_mqtt_payload(payload: bytes) -> Optional[dict]:
-    """Validate an MQTT event payload and pass it through the shared ingestion path."""
+    """Validate an MQTT event body and pass valid data into the edge loop.
+
+    Args:
+        payload: UTF-8 JSON bytes from an RSU telemetry subscription.
+
+    Returns:
+        The ingestion response for a valid event, or ``None`` for invalid JSON.
+    """
     try:
         event = V2XEvent.model_validate_json(payload)
     except (ValidationError, ValueError):
@@ -103,6 +137,7 @@ def handle_mqtt_payload(payload: bytes) -> Optional[dict]:
 
 
 def _mqtt_on_connect(client, userdata, flags, reason_code, properties) -> None:
+    """Subscribe the connected RSU client to its supported telemetry topics."""
     client.subscribe(
         [
             (f"v2x/{rsu_id}/telemetry", MQTT_QOS),
@@ -112,10 +147,12 @@ def _mqtt_on_connect(client, userdata, flags, reason_code, properties) -> None:
 
 
 def _mqtt_on_message(client, userdata, message) -> None:
+    """Pass an MQTT telemetry message to the shared event-ingestion path."""
     handle_mqtt_payload(message.payload)
 
 
 def _mqtt_subscriber_loop() -> None:
+    """Maintain the QoS-configured MQTT subscriber with reconnect retries."""
     global mqtt_client
     import paho.mqtt.client as mqtt
 
@@ -140,6 +177,7 @@ def _mqtt_subscriber_loop() -> None:
 
 
 async def _start_mqtt_subscriber() -> None:
+    """Start the background MQTT subscriber when MQTT is enabled."""
     global mqtt_thread
     if enable_mqtt and (mqtt_thread is None or not mqtt_thread.is_alive()):
         mqtt_stop_event.clear()
@@ -152,6 +190,7 @@ async def _start_mqtt_subscriber() -> None:
 
 
 async def _stop_mqtt_subscriber() -> None:
+    """Stop the MQTT connection and join its subscriber thread during shutdown."""
     mqtt_stop_event.set()
     if mqtt_client is not None:
         try:
@@ -164,6 +203,7 @@ async def _stop_mqtt_subscriber() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Manage MQTT subscriber startup and shutdown with the FastAPI lifespan."""
     await _start_mqtt_subscriber()
     try:
         yield
@@ -176,23 +216,39 @@ app = FastAPI(title="V2X RSU Edge Service", lifespan=lifespan)
 
 @app.get("/health")
 def health():
+    """Return a liveness response for container and deployment health checks."""
     return {"status": "healthy"}
 
 
 @app.get("/api/status")
 def status():
+    """Expose edge counters, connection state, and recent local/cloud alerts."""
     return processor.get_status()
 
 
 @app.post("/api/events")
 def ingest_event(event: V2XEvent):
-    """Ingest a V2XEvent via HTTP (for testing or fallback)."""
+    """Ingest a validated event through the RSU HTTP fallback endpoint.
+
+    Args:
+        event: Event submitted by an OBU, test, or cloud demo flow.
+
+    Returns:
+        The shared edge-ingestion response.
+    """
     return ingest_v2x_event(event)
 
 
 @app.post("/api/control/disconnection")
 def control_disconnection(payload: dict):
-    """Simulate/restore edge-cloud disconnection."""
+    """Toggle cloud connectivity and retry buffered events when reconnecting.
+
+    Args:
+        payload: Object with ``disconnected`` set to the desired connection state.
+
+    Returns:
+        The disconnection status, or flush and SQS-send counts after reconnection.
+    """
     disconnected = payload.get("disconnected", False)
     processor.cloud_disconnected = disconnected
     
@@ -217,7 +273,7 @@ def control_disconnection(payload: dict):
 
 @app.post("/api/control/reset")
 def control_reset():
-    """Reset all counters for clean experiment runs."""
+    """Replace edge state with a fresh processor for isolated experiment runs."""
     global processor
     processor = EdgeProcessor(
         rsu_id=rsu_id,
@@ -230,7 +286,14 @@ def control_reset():
 
 @app.post("/sns/alerts")
 async def sns_alerts(request: Request):
-    """Handle AWS SNS messages (alert relay)."""
+    """Confirm SNS subscriptions or validate and relay incoming alert notifications.
+
+    Args:
+        request: SNS HTTP request carrying a subscription, notification, or alert.
+
+    Returns:
+        A status identifying subscription confirmation or successful alert relay.
+    """
     try:
         body = await request.json()
     except ValueError as exc:
@@ -273,6 +336,11 @@ async def sns_alerts(request: Request):
 
 
 def relay_cloud_alert(alert: V2XAlert) -> None:
+    """Record a cloud alert and publish it on the RSU's MQTT alert topics.
+
+    Args:
+        alert: Validated cloud alert received from SNS or direct HTTP relay.
+    """
     processor.relay_cloud_alert(alert)
     alert_payload = alert.model_dump(mode="json")
     publish_mqtt(f"v2x/{rsu_id}/alerts/cloud", alert_payload)
@@ -281,7 +349,14 @@ def relay_cloud_alert(alert: V2XAlert) -> None:
 
 @app.post("/api/alerts/relay")
 def relay_alert(alert: V2XAlert):
-    """Direct alert relay endpoint."""
+    """Relay a validated cloud alert directly to this RSU's MQTT subscribers.
+
+    Args:
+        alert: Alert supplied by the cloud HTTP fan-out path.
+
+    Returns:
+        A status confirming that the alert was relayed.
+    """
     relay_cloud_alert(alert)
     return {"status": "alert_relayed"}
 

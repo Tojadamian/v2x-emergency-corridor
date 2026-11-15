@@ -1,3 +1,5 @@
+"""Cloud-side safety rules that turn ingested V2X events into alerts."""
+
 from typing import Optional, Sequence
 from common.schemas import V2XEvent, V2XAlert
 
@@ -5,7 +7,17 @@ def evaluate_event_for_alert(
     event: V2XEvent, vehicle_states: Sequence[V2XEvent] = (),
     previous_vehicle_state: Optional[V2XEvent] = None,
 ) -> Optional[V2XAlert]:
-    """Evaluates an incoming V2XEvent and returns a V2XAlert if safety conditions are met."""
+    """Evaluate an event and current vehicle context against cloud safety rules.
+
+    Args:
+        event: Newly ingested event.
+        vehicle_states: Latest known events used for congestion and occupancy checks.
+        previous_vehicle_state: Prior state for the event source, when available.
+
+    Returns:
+        A cloud-origin alert for a matched hazard, corridor, or braking condition;
+        otherwise ``None``.
+    """
 
     if event.event_type == "road_hazard":
         return V2XAlert(
